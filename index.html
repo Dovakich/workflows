@@ -526,7 +526,7 @@ async function checkServerStatus() {
   const text = $('statusText');
   try {
     const ip  = settings.serverIP || 'play.y-craft.net';
-    const res = await fetch(`https:
+    const res = await fetch(`https://api.mcsrvstat.us/3/${ip}`,
       { signal: AbortSignal.timeout(8000) });
     const data = await res.json();
     if (data.online) {

@@ -1,326 +1,88 @@
-'use strict';
+# ════════════════════════════════════════════════════════════
+#  Y-Craft — Генератор manifest.json для ZIP-архівів
+#  Запуск: ./generate-manifest.ps1
+# ════════════════════════════════════════════════════════════
 
-const { EventEmitter } = require('events');
-const path   = require('path');
-const fs     = require('fs');
-const https  = require('https');
-const http   = require('http');
-const crypto = require('crypto');
-const os     = require('os');
+param(
+    [string]$Version    = "1.0.0",
+    [string]$GithubUser = "ВАШ_НІК",
+    [string]$GithubRepo = "ycraft-modpack"
+)
 
-class ModpackManager extends EventEmitter {
-  constructor(gameDir, manifestUrl, log) {
-    super();
-    this.gameDir     = gameDir;
-    this.manifestUrl = manifestUrl;
-    this.log         = log;
-    this.localMeta   = path.join(gameDir, '.modpack-meta.json');
-  }
+$BaseUrl = "https://github.com/$GithubUser/$GithubRepo/releases/download/v$Version"
 
-  async checkForUpdates() {
-    this._status('Перевірка оновлень модпаку…');
-    let remote;
-    try {
-      remote = await this._fetchJSON(this.manifestUrl);
-    } catch (e) {
-      this.log.warn('ModpackManager: manifest недоступний:', e.message);
-      return { upToDate: true, offline: true };
-    }
+Write-Host ""
+Write-Host "  Y-Craft Manifest Generator" -ForegroundColor Cyan
+Write-Host "  Версія: $Version" -ForegroundColor Gray
+Write-Host "  URL:    $BaseUrl" -ForegroundColor Gray
+Write-Host ""
 
-    const local = this._loadMeta();
+# ── Перевіряємо наявність папок ──────────────────────────────────────────────
+$archives = @()
 
-    if (!local || local.version !== remote.version) {
-      return {
-        upToDate:      false,
-        remoteVersion: remote.version,
-        localVersion:  local?.version || 'немає',
-        hasArchives:   !!(remote.archives?.length),
-        hasFiles:      !!(remote.files?.length)
-      };
-    }
+foreach ($folder in @("mods", "config", "resourcepacks", "shaderpacks")) {
+    if (Test-Path $folder) {
+        Write-Host "  Обробка папки: $folder..." -ForegroundColor Yellow
 
-    return { upToDate: true, version: remote.version };
-  }
+        $zipName = "$folder.zip"
+        $zipPath = Join-Path $PWD $zipName
 
-  async update() {
-    this._status('Отримання маніфесту модпаку…');
-    const manifest = await this._fetchJSON(this.manifestUrl);
+        # Пакуємо в ZIP
+        if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+        Compress-Archive -Path "$folder\*" -DestinationPath $zipPath -Force
 
-    fs.mkdirSync(this.gameDir, { recursive: true });
+        # Рахуємо SHA1
+        $hash = (Get-FileHash $zipPath -Algorithm SHA1).Hash.ToLower()
+        $size = (Get-Item $zipPath).Length
 
-    if (manifest.archives?.length) {
-      await this._processArchives(manifest.archives);
-    }
-
-    if (manifest.files?.length) {
-      await this._processFiles(manifest.files);
-    }
-
-    this._saveMeta({ version: manifest.version, updatedAt: Date.now() });
-    this._status('Модпак актуальний!', true);
-    return { version: manifest.version };
-  }
-
-  async _processArchives(archives) {
-    const meta  = this._loadMeta() || {};
-    const total = archives.length;
-
-    for (let i = 0; i < archives.length; i++) {
-      const arc = archives[i];
-      this._status(`Перевірка ${arc.name} (${i + 1}/${total})…`);
-
-      const destDir  = path.join(this.gameDir, arc.extractTo || arc.name);
-      const tempZip  = path.join(os.tmpdir(), `ycraft-${arc.name}-${Date.now()}.zip`);
-
-      const cachedVer = meta[`archive_${arc.name}`];
-      if (cachedVer && cachedVer === arc.version) {
-        this.emit('progress', {
-          file: arc.name, current: i + 1, total,
-          percent: Math.round(((i + 1) / total) * 100),
-          status: 'актуальний'
-        });
-        continue;
-      }
-
-      this._status(`Завантаження ${arc.name}.zip…`);
-      await this._dlProgress(arc.url, tempZip, arc.size || null, arc.name + '.zip');
-
-      if (arc.sha1) {
-        const hash = await this._hashFile(tempZip);
-        if (hash !== arc.sha1.toLowerCase()) {
-          fs.unlinkSync(tempZip);
-          throw new Error(
-            `SHA1 не збігається для ${arc.name}: очікувалось ${arc.sha1}, отримано ${hash}`
-          );
+        $archives += @{
+            name      = $folder
+            url       = "$BaseUrl/$zipName"
+            extractTo = $folder
+            sha1      = $hash
+            version   = $Version
+            size      = $size
         }
-      }
 
-      this._status(`Розпакування ${arc.name}…`);
-      if (fs.existsSync(destDir)) {
-        fs.rmSync(destDir, { recursive: true, force: true });
-      }
-      fs.mkdirSync(destDir, { recursive: true });
-
-      await this._extractZip(tempZip, destDir);
-
-      try { fs.unlinkSync(tempZip); } catch {}
-
-      meta[`archive_${arc.name}`] = arc.version;
-      this._saveMeta({ ...meta, version: meta.version });
-
-      this.emit('progress', {
-        file: arc.name, current: i + 1, total,
-        percent: Math.round(((i + 1) / total) * 100),
-        status: 'оновлено'
-      });
-
-      this.log.info(`[Modpack] ${arc.name} оновлено до v${arc.version}`);
+        $sizeMB = [math]::Round($size / 1MB, 1)
+        Write-Host "    OK: $zipName ($sizeMB МБ), sha1: $($hash.Substring(0,12))..." -ForegroundColor Green
     }
-  }
-
-  async _processFiles(files) {
-    const total = files.length;
-
-    await this._removeObsolete(files);
-
-    for (let i = 0; i < total; i++) {
-      const f    = files[i];
-      const dest = path.join(this.gameDir, f.path);
-
-      if (f.sha1 && fs.existsSync(dest)) {
-        const hash = await this._hashFile(dest);
-        if (hash === f.sha1.toLowerCase()) {
-          this.emit('progress', {
-            file: f.name || path.basename(f.path),
-            current: i + 1, total,
-            percent: Math.round(((i + 1) / total) * 100),
-            status: 'skip'
-          });
-          continue;
-        }
-      }
-
-      this.emit('progress', {
-        file: f.name || path.basename(f.path),
-        current: i + 1, total,
-        percent: Math.round(((i + 1) / total) * 100),
-        status: 'завантаження'
-      });
-
-      fs.mkdirSync(path.dirname(dest), { recursive: true });
-      await this._dlProgress(f.url, dest, f.size || null, f.name || path.basename(f.path));
-    }
-  }
-
-  async _removeObsolete(remoteFiles) {
-    const validPaths = new Set(remoteFiles.map(f => path.join(this.gameDir, f.path)));
-    const modsDir    = path.join(this.gameDir, 'mods');
-    if (!fs.existsSync(modsDir)) return;
-
-    for (const f of fs.readdirSync(modsDir)) {
-      const full = path.join(modsDir, f);
-      if (!validPaths.has(full)) {
-        fs.rmSync(full, { force: true });
-        this.log.info('[Modpack] Видалено застарілий файл:', f);
-      }
-    }
-  }
-
-  async _extractZip(zipPath, destDir) {
-
-    try {
-      const StreamZip = require('node-stream-zip');
-      const zip = new StreamZip.async({ file: zipPath });
-      const entries = await zip.entries();
-      const total   = Object.keys(entries).length;
-      let done = 0;
-
-      for (const [name, entry] of Object.entries(entries)) {
-        if (entry.isDirectory) continue;
-        const dest = path.join(destDir, name);
-        fs.mkdirSync(path.dirname(dest), { recursive: true });
-        await zip.extract(name, dest);
-        done++;
-        if (done % 10 === 0) {
-          this.emit('progress', {
-            file:    'Розпакування…',
-            percent: Math.round((done / total) * 100),
-            current: done, total
-          });
-        }
-      }
-      await zip.close();
-      return;
-    } catch (e) {
-      this.log.warn('[Modpack] node-stream-zip недоступний, спробуємо системний unzip:', e.message);
-    }
-
-    await this._extractZipSystem(zipPath, destDir);
-  }
-
-  _extractZipSystem(zipPath, destDir) {
-    return new Promise((resolve, reject) => {
-      const { spawn } = require('child_process');
-      let proc;
-
-      if (process.platform === 'win32') {
-
-        proc = spawn('powershell', [
-          '-NoProfile', '-NonInteractive', '-Command',
-          `Expand-Archive -Force -LiteralPath '${zipPath}' -DestinationPath '${destDir}'`
-        ]);
-      } else {
-        proc = spawn('unzip', ['-o', '-q', zipPath, '-d', destDir]);
-      }
-
-      proc.on('close', code => {
-        if (code === 0) resolve();
-        else reject(new Error(`Розпакування завершилось з кодом ${code}`));
-      });
-      proc.on('error', reject);
-    });
-  }
-
-  _loadMeta() {
-    if (!fs.existsSync(this.localMeta)) return null;
-    try { return JSON.parse(fs.readFileSync(this.localMeta, 'utf8')); }
-    catch { return null; }
-  }
-
-  _saveMeta(data) {
-    try { fs.writeFileSync(this.localMeta, JSON.stringify(data, null, 2)); }
-    catch (e) { this.log.warn('[Modpack] saveMeta failed:', e.message); }
-  }
-
-  _status(msg, done = false) {
-    this.emit('status', { message: msg, done });
-    this.log.info('[Modpack]', done ? '(done)' : msg.slice(0, 40));
-  }
-
-  _hashFile(filePath) {
-    return new Promise((resolve, reject) => {
-      const hash = crypto.createHash('sha1');
-      fs.createReadStream(filePath)
-        .on('data', d  => hash.update(d))
-        .on('end',  () => resolve(hash.digest('hex')))
-        .on('error', reject);
-    });
-  }
-
-  _dlProgress(url, dest, totalSize, label) {
-    return new Promise((resolve, reject) => {
-      const doReq = (reqUrl) => {
-        const lib  = reqUrl.startsWith('https') ? https : http;
-        const file = fs.createWriteStream(dest);
-        let received = 0;
-
-        const req = lib.get(reqUrl, { headers: { 'User-Agent': 'YCraft-Launcher/1.0' } }, (res) => {
-          const { statusCode, headers } = res;
-          if ([301,302,303,307,308].includes(statusCode)) {
-            res.resume(); file.close(); fs.unlink(dest, () => {});
-            const next = headers.location.startsWith('http')
-              ? headers.location
-              : new URL(headers.location, reqUrl).href;
-            return doReq(next);
-          }
-          if (statusCode !== 200) {
-            res.resume(); file.close(); fs.unlink(dest, () => {});
-            return reject(new Error(`HTTP ${statusCode} для ${label}`));
-          }
-          const total = totalSize || parseInt(headers['content-length'] || '0', 10);
-          res.on('data', chunk => {
-            received += chunk.length;
-            file.write(chunk);
-            if (total > 0) {
-              this.emit('progress', {
-                file: label,
-                percent: Math.round((received / total) * 100),
-                received: this._fmt(received),
-                total:    this._fmt(total)
-              });
-            }
-          });
-          res.on('end',   () => { file.close(); resolve(); });
-          res.on('error', e  => { file.close(); fs.unlink(dest, () => {}); reject(e); });
-        });
-        req.on('error', e => { file.close(); fs.unlink(dest, () => {}); reject(e); });
-        req.setTimeout(60_000, () => { req.destroy(); reject(new Error('Timeout: ' + label)); });
-      };
-      doReq(url);
-    });
-  }
-
-  _fetchJSON(url) {
-    return new Promise((resolve, reject) => {
-      const doReq = (reqUrl) => {
-        const lib = reqUrl.startsWith('https') ? https : http;
-        lib.get(reqUrl, { headers: { 'User-Agent': 'YCraft-Launcher/1.0' }, timeout: 15000 }, (res) => {
-          const { statusCode, headers } = res;
-          if ([301,302,303,307,308].includes(statusCode)) {
-            res.resume();
-            return doReq(headers.location.startsWith('http')
-              ? headers.location
-              : new URL(headers.location, reqUrl).href);
-          }
-          let data = '';
-          res.on('data', c => data += c);
-          res.on('end', () => {
-            try   { resolve(JSON.parse(data)); }
-            catch { reject(new Error('Некоректний JSON з ' + reqUrl)); }
-          });
-          res.on('error', reject);
-        }).on('error', reject);
-      };
-      doReq(url);
-    });
-  }
-
-  _fmt(b = 0) {
-    if (b < 1024)          return b + ' Б';
-    if (b < 1_048_576)     return (b / 1024).toFixed(1)        + ' КБ';
-    if (b < 1_073_741_824) return (b / 1_048_576).toFixed(1)   + ' МБ';
-    return (b / 1_073_741_824).toFixed(2) + ' ГБ';
-  }
 }
 
-module.exports = { ModpackManager };
+if ($archives.Count -eq 0) {
+    Write-Host "  Помилка: не знайдено жодної папки (mods, config тощо)" -ForegroundColor Red
+    Write-Host "  Запустіть скрипт з папки де знаходяться mods/ та config/" -ForegroundColor Red
+    exit 1
+}
+
+# ── Генеруємо manifest.json ───────────────────────────────────────────────────
+$manifest = [ordered]@{
+    version      = $Version
+    mcVersion    = "1.20.1"
+    forgeVersion = "47.4.10"
+    updatedAt    = (Get-Date -Format "yyyy-MM-dd HH:mm")
+    archives     = $archives
+}
+
+$json = $manifest | ConvertTo-Json -Depth 5
+Set-Content -Path "manifest.json" -Value $json -Encoding UTF8
+
+Write-Host ""
+Write-Host "  manifest.json створено!" -ForegroundColor Green
+Write-Host ""
+Write-Host "  Наступні кроки:" -ForegroundColor Cyan
+Write-Host "  1. Завантажте ZIP-архіви на GitHub Releases v$Version"
+Write-Host "     gh release create v$Version --title 'Modpack v$Version' --notes ''"
+
+foreach ($arc in $archives) {
+    Write-Host "     gh release upload v$Version $($arc.name).zip --repo $GithubUser/$GithubRepo"
+}
+
+Write-Host "     gh release upload v$Version manifest.json --repo $GithubUser/$GithubRepo"
+Write-Host ""
+Write-Host "  2. Покладіть manifest.json у корінь репозиторію:"
+Write-Host "     git add manifest.json && git commit -m 'v$Version' && git push"
+Write-Host ""
+Write-Host "  3. У лаунчері (src/main/main.js) вкажіть URL маніфесту:"
+Write-Host "     https://raw.githubusercontent.com/$GithubUser/$GithubRepo/main/manifest.json"
+Write-Host ""

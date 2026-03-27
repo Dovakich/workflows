@@ -1,0 +1,83 @@
+{
+  "name": "ycraft-launcher",
+  "version": "1.0.0",
+  "description": "Y-Craft Official Minecraft Launcher",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder",
+    "build:win": "set CSC_IDENTITY_AUTO_DISCOVERY=false && electron-builder --win --publish never",
+    "build:linux": "electron-builder --linux --publish never",
+    "build:mac": "electron-builder --mac --publish never"
+  },
+  "build": {
+    "appId": "com.ycraft.launcher",
+    "productName": "Y-Craft Launcher",
+    "copyright": "Copyright © 2024 Y-Craft",
+    "icon": "assets/icon",
+    "files": [
+      "package.json",
+      "src/**/*",
+      "assets/**/*",
+      "node_modules/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico",
+      "sign": null,
+      "signingHashAlgorithms": null
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.png",
+      "category": "Game"
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.icns",
+      "identity": null
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "forceCodeSigning": false
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "electron-log": "^5.0.0",
+    "electron-store": "^8.1.0",
+    "electron-updater": "^6.1.4",
+    "extract-zip": "^2.0.1",
+    "node-stream-zip": "^1.15.0"
+  },
+  "devDependencies": {
+    "electron": "^27.1.0",
+    "electron-builder": "^24.6.4"
+  },
+  "author": "Y-Craft Team"
+}
