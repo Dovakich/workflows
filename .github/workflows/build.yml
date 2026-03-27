@@ -5,10 +5,6 @@ on:
     branches: [main]
   workflow_dispatch:
 
-defaults:
-  run:
-    working-directory: ycraft-launcher
-
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -24,7 +20,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: windows-installer
-          path: ycraft-launcher/dist/*.exe
+          path: dist/*.exe
 
   build-mac:
     runs-on: macos-latest
@@ -40,7 +36,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: mac-installers
-          path: ycraft-launcher/dist/*.dmg
+          path: dist/*.dmg
 
   build-linux:
     runs-on: ubuntu-latest
@@ -54,4 +50,4 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: linux-appimage
-          path: ycraft-launcher/dist/*.AppImage
+          path: dist/*.AppImage
