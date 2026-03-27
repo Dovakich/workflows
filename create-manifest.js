@@ -1,200 +1,224 @@
-#!/usr/bin/env node
-/**
- * ╔══════════════════════════════════════════════════════╗
- *  Y-Craft — Генератор маніфесту модпаку
- *  Запуск: node create-manifest.js
- * ╚══════════════════════════════════════════════════════╝
- *
- * Що робить:
- *  1. Сканує папки mods/, config/, resourcepacks/, shaderpacks/
- *  2. Рахує SHA1 кожного файлу
- *  3. Записує manifest.json який лаунчер використовує для авто-оновлень
- *
- * Після генерації:
- *  - Завантаж всі файли на свій CDN/хостинг
- *  - Заміни BASE_URL на реальну адресу
- *  - Постав manifest.json на сервер оновлень
- */
-
 'use strict';
 
-const fs     = require('fs');
-const path   = require('path');
-const crypto = require('crypto');
-const https  = require('https');
-const http   = require('http');
+const { app, BrowserWindow, ipcMain, shell, dialog } = require('electron');
+const path = require('path');
+const fs   = require('fs');
+const { autoUpdater } = require('electron-updater');
+const log  = require('electron-log');
+const Store = require('electron-store');
 
-// ── НАЛАШТУВАННЯ ──────────────────────────────────────────
-const CONFIG = {
-  // Папка де лежать твої готові мод-файли (mods/, config/ тощо)
-  sourceDir: process.argv[2] || '.',
+app.disableHardwareAcceleration();
+app.commandLine.appendSwitch('disable-gpu');
+app.commandLine.appendSwitch('disable-gpu-compositing');
+app.commandLine.appendSwitch('no-sandbox');
 
-  // Базова URL де будуть лежати файли після завантаження на хостинг
-  // Приклад: 'https://cdn.y-craft.net/modpack'
-  baseUrl: process.argv[3] || 'https://cdn.y-craft.net/modpack',
+log.transports.file.level = 'info';
+log.transports.console.level = 'warn';
+autoUpdater.logger = log;
 
-  // Версія паку — збільшуй кожного разу коли змінюєш файли
-  packVersion: process.argv[4] || '1.0.0',
-
-  // Папки які включати в маніфест
-  includeDirs: ['mods', 'config', 'resourcepacks', 'shaderpacks'],
-
-  // Розширення файлів які включати
-  includeExts: ['.jar', '.zip', '.toml', '.cfg', '.json', '.properties', '.txt', '.png'],
-
-  // Файли які НЕ включати
-  excludePatterns: [
-    /^\./, /~$/, /\.tmp$/, /desktop\.ini$/i, /thumbs\.db$/i,
-    /^__MACOSX/, /\.DS_Store$/,
-  ],
-};
-// ─────────────────────────────────────────────────────────
-
-async function main() {
-  console.log('\n╔══════════════════════════════════════════╗');
-  console.log(' Y-Craft — Генератор маніфесту модпаку');
-  console.log('╚══════════════════════════════════════════╝\n');
-
-  const sourceDir = path.resolve(CONFIG.sourceDir);
-  console.log(`📁 Джерело:    ${sourceDir}`);
-  console.log(`🌐 Базовий URL: ${CONFIG.baseUrl}`);
-  console.log(`📦 Версія паку: ${CONFIG.packVersion}\n`);
-
-  if (!fs.existsSync(sourceDir)) {
-    console.error(`❌ Папка не знайдена: ${sourceDir}`);
-    console.log('\nВикористання:');
-    console.log('  node create-manifest.js <шлях_до_папки_гри> <base_url> <версія>');
-    console.log('\nПриклад:');
-    console.log('  node create-manifest.js "C:/Users/Admin/AppData/Roaming/.ycraft" "https://cdn.y-craft.net/pack" "1.2.0"');
-    process.exit(1);
+const store = new Store({
+  defaults: {
+    username:      '',
+    ram:           2048,
+    javaPath:      '',
+    gameDir:       path.join(app.getPath('appData'), '.ycraft'),
+    windowWidth:   1280,
+    windowHeight:  720,
+    fullscreen:    false,
+    closeOnLaunch: true,
+    serverIP:      'play.y-craft.net',
+    autoConnect:   false,
+    lastVersion:   ''
   }
-
-  const files = [];
-  let totalSize = 0;
-
-  for (const dir of CONFIG.includeDirs) {
-    const fullDir = path.join(sourceDir, dir);
-    if (!fs.existsSync(fullDir)) {
-      console.log(`  ⏭  Пропуск (немає папки): ${dir}/`);
-      continue;
-    }
-
-    console.log(`  📂 Сканування: ${dir}/`);
-    const found = scanDir(fullDir, sourceDir);
-    console.log(`     → Знайдено ${found.length} файлів`);
-    files.push(...found);
-  }
-
-  console.log(`\n⏳ Рахуємо SHA1 для ${files.length} файлів…\n`);
-
-  const manifest = {
-    version:      CONFIG.packVersion,
-    mcVersion:    '1.20.1',
-    forgeVersion: '47.4.10',
-    generated:    new Date().toISOString(),
-    files:        [],
-  };
-
-  for (let i = 0; i < files.length; i++) {
-    const f    = files[i];
-    const sha1 = await hashFile(f.absPath);
-    const size = fs.statSync(f.absPath).size;
-    totalSize += size;
-
-    // Нормалізуємо шлях (завжди прямий слеш)
-    const relPath = f.relPath.replace(/\\/g, '/');
-
-    manifest.files.push({
-      name:  path.basename(f.absPath),
-      path:  relPath,
-      url:   `${CONFIG.baseUrl}/${relPath}`,
-      sha1,
-      size,
-    });
-
-    process.stdout.write(`\r  [${i + 1}/${files.length}] ${path.basename(f.absPath).slice(0, 50).padEnd(50)}`);
-  }
-
-  console.log('\n');
-
-  // Зберігаємо manifest.json
-  const outPath = path.join(sourceDir, 'modpack.json');
-  fs.writeFileSync(outPath, JSON.stringify(manifest, null, 2), 'utf8');
-
-  console.log('╔══════════════════════════════════════════╗');
-  console.log(' ✅  Маніфест успішно створено!');
-  console.log('╠══════════════════════════════════════════╣');
-  console.log(` 📄 Файл:      ${outPath}`);
-  console.log(` 📦 Файлів:    ${manifest.files.length}`);
-  console.log(` 💾 Розмір:    ${fmtSize(totalSize)}`);
-  console.log('╠══════════════════════════════════════════╣');
-  console.log(' Наступні кроки:');
-  console.log('');
-  console.log(' 1. Завантаж усі файли на твій CDN/хостинг:');
-  console.log(`    Структура папок має повторювати: ${CONFIG.baseUrl}/mods/...`);
-  console.log('');
-  console.log(' 2. Постав modpack.json на сервер оновлень:');
-  console.log(`    ${CONFIG.baseUrl.replace('/modpack', '')}/modpack/manifest.json`);
-  console.log('');
-  console.log(' 3. В src/main/main.js переконайся що:');
-  console.log(`    MODPACK_MANIFEST_URL = '${CONFIG.baseUrl.replace('/modpack', '')}/modpack/manifest.json'`);
-  console.log('╚══════════════════════════════════════════╝\n');
-
-  // Додатково — генеруємо upload-list.txt для зручності
-  const uploadList = manifest.files
-    .map(f => `${path.join(sourceDir, f.path.replace(/\//g, path.sep))}  →  ${f.url}`)
-    .join('\n');
-  const uploadPath = path.join(sourceDir, 'upload-list.txt');
-  fs.writeFileSync(uploadPath, uploadList, 'utf8');
-  console.log(`📋 Список для завантаження збережено: ${uploadPath}\n`);
-}
-
-// ── Рекурсивне сканування папки ───────────────────────────
-function scanDir(dir, baseDir) {
-  const results = [];
-  if (!fs.existsSync(dir)) return results;
-
-  for (const entry of fs.readdirSync(dir)) {
-    // Перевіряємо виключення
-    if (CONFIG.excludePatterns.some(p => p.test(entry))) continue;
-
-    const fullPath = path.join(dir, entry);
-    const stat     = fs.statSync(fullPath);
-
-    if (stat.isDirectory()) {
-      results.push(...scanDir(fullPath, baseDir));
-    } else if (stat.isFile()) {
-      const ext = path.extname(entry).toLowerCase();
-      if (CONFIG.includeExts.includes(ext) || dir.includes('mods')) {
-        results.push({
-          absPath: fullPath,
-          relPath: path.relative(baseDir, fullPath),
-        });
-      }
-    }
-  }
-  return results;
-}
-
-// ── SHA1 хеш файлу ────────────────────────────────────────
-function hashFile(filePath) {
-  return new Promise((resolve, reject) => {
-    const hash   = crypto.createHash('sha1');
-    const stream = fs.createReadStream(filePath);
-    stream.on('data', d => hash.update(d));
-    stream.on('end',  () => resolve(hash.digest('hex')));
-    stream.on('error', reject);
-  });
-}
-
-// ── Форматування розміру ──────────────────────────────────
-function fmtSize(bytes) {
-  if (bytes < 1_048_576)    return (bytes / 1024).toFixed(1)    + ' КБ';
-  if (bytes < 1_073_741_824) return (bytes / 1_048_576).toFixed(1) + ' МБ';
-  return (bytes / 1_073_741_824).toFixed(2) + ' ГБ';
-}
-
-main().catch(e => {
-  console.error('\n❌ Помилка:', e.message);
-  process.exit(1);
 });
+
+const LAUNCHER_VERSION     = app.getVersion();
+const UPDATE_FEED_URL      = 'https://updates.y-craft.net/launcher';
+const MODPACK_MANIFEST_URL = 'https://updates.y-craft.net/modpack/manifest.json';
+const FORGE_VERSION        = '47.4.10';
+const MC_VERSION           = '1.20.1';
+
+let mainWindow = null;
+
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width:           1060,
+    height:          640,
+    minWidth:        880,
+    minHeight:       560,
+    frame:           false,
+    transparent:     false,
+    backgroundColor: '#0d0f14',
+    resizable:       true,
+    icon:            path.join(__dirname, '../../assets/icon.png'),
+    webPreferences: {
+      preload:          path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration:  false
+    }
+  });
+
+  mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
+  mainWindow.on('closed', () => { mainWindow = null; });
+}
+
+app.whenReady().then(() => {
+  createWindow();
+  setupAutoUpdater();
+  setupIPC();
+});
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit();
+});
+app.on('activate', () => {
+  if (BrowserWindow.getAllWindows().length === 0) createWindow();
+});
+
+function setupAutoUpdater() {
+  if (process.env.NODE_ENV === 'development') return;
+  try {
+    autoUpdater.setFeedURL({ provider: 'generic', url: UPDATE_FEED_URL });
+    autoUpdater.on('checking-for-update',  () => send('updater:status', { status: 'checking' }));
+    autoUpdater.on('update-available',  i  => send('updater:status', { status: 'available', version: i.version }));
+    autoUpdater.on('update-not-available', () => send('updater:status', { status: 'latest' }));
+    autoUpdater.on('update-downloaded',    () => send('updater:status', { status: 'ready' }));
+    autoUpdater.on('error', err => {
+      log.warn('AutoUpdater:', err.message);
+      send('updater:status', { status: 'error', message: err.message });
+    });
+    autoUpdater.on('download-progress', p => send('updater:progress', {
+      percent:  Math.round(p.percent),
+      speed:    fmt(p.bytesPerSecond) + '/s',
+      total:    fmt(p.total),
+      received: fmt(p.transferred)
+    }));
+    autoUpdater.checkForUpdates().catch(() => {});
+    setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 30 * 60 * 1000);
+  } catch (e) {
+    log.warn('AutoUpdater init failed:', e.message);
+  }
+}
+
+function setupIPC() {
+  const { GameLauncher }   = require('./game-launcher');
+  const { ModpackManager } = require('./modpack-manager');
+  const { ForgeInstaller } = require('./forge-installer');
+
+  const gameDir   = store.get('gameDir');
+  const launcher  = new GameLauncher(store, log);
+  const modpack   = new ModpackManager(gameDir, MODPACK_MANIFEST_URL, log);
+  const forgeInst = new ForgeInstaller(gameDir, MC_VERSION, FORGE_VERSION, log);
+
+  ipcMain.on('window:minimize', () => mainWindow?.minimize());
+  ipcMain.on('window:maximize', () => mainWindow?.isMaximized() ? mainWindow.unmaximize() : mainWindow?.maximize());
+  ipcMain.on('window:close',    () => mainWindow?.close());
+
+  ipcMain.handle('settings:get',    ()         => store.store);
+  ipcMain.handle('settings:set',    (_, k, v)  => { store.set(k, v); return true; });
+  ipcMain.handle('settings:setAll', (_, obj)   => { Object.entries(obj).forEach(([k,v]) => store.set(k,v)); return true; });
+
+  ipcMain.handle('dialog:browseJava', async () => {
+    const r = await dialog.showOpenDialog(mainWindow, {
+      title: 'Оберіть виконуваний файл Java',
+      properties: ['openFile'],
+      filters: [{ name: 'Java', extensions: ['exe', ''] }]
+    });
+    return r.filePaths[0] || null;
+  });
+
+  ipcMain.handle('dialog:browseGameDir', async () => {
+    const r = await dialog.showOpenDialog(mainWindow, {
+      title: 'Оберіть теку гри',
+      properties: ['openDirectory', 'createDirectory']
+    });
+    return r.filePaths[0] || null;
+  });
+
+  ipcMain.handle('launcher:version',    () => LAUNCHER_VERSION);
+  ipcMain.handle('launcher:openGameDir', () => shell.openPath(store.get('gameDir')));
+
+  ipcMain.handle('mods:list', () => {
+    const modsDir = path.join(store.get('gameDir'), 'mods');
+    if (!fs.existsSync(modsDir)) return [];
+    try {
+      return fs.readdirSync(modsDir)
+        .filter(f => f.endsWith('.jar') && !f.endsWith('.disabled'))
+        .map(f => {
+          const stat = fs.statSync(path.join(modsDir, f));
+          return {
+            filename: f,
+            name:     f.replace(/[-_](\d[\d.]*)([-_]mc[\d.]*)?\.jar$/i, '').replace(/[-_]/g, ' ').trim() || f,
+            size:     fmt(stat.size),
+            mtime:    stat.mtime.toLocaleDateString('uk-UA')
+          };
+        })
+        .sort((a, b) => a.name.localeCompare(b.name, 'uk'));
+    } catch (e) {
+      log.warn('mods:list error:', e.message);
+      return [];
+    }
+  });
+
+  ipcMain.handle('modpack:check', async () => {
+    try { return await modpack.checkForUpdates(); }
+    catch (e) { return { error: e.message, upToDate: true, offline: true }; }
+  });
+
+  ipcMain.handle('modpack:update', async () => {
+    modpack.removeAllListeners('progress');
+    modpack.removeAllListeners('status');
+    modpack.on('progress', d => send('modpack:progress', d));
+    modpack.on('status',   d => send('modpack:status',   d));
+    try { await modpack.update(); return { success: true }; }
+    catch (e) { return { error: e.message }; }
+  });
+
+  ipcMain.handle('forge:check', () => forgeInst.isInstalled());
+
+  ipcMain.handle('forge:install', async () => {
+    forgeInst.removeAllListeners('progress');
+    forgeInst.removeAllListeners('status');
+    forgeInst.on('progress', d => send('forge:progress', d));
+    forgeInst.on('status',   d => send('forge:status',   d));
+    forgeInst.setJavaPath(store.get('javaPath') || '');
+    try { await forgeInst.install(); return { success: true }; }
+    catch (e) { log.error('forge:install:', e.message); return { error: e.message }; }
+  });
+
+  ipcMain.handle('game:launch', async (_, opts) => {
+    launcher.removeAllListeners();
+
+    launcher.on('stdout',  line => send('game:stdout', line));
+    launcher.on('stderr',  line => send('game:stderr', line));
+    launcher.on('started', ()   => send('game:started', {}));
+    launcher.on('closed',  code => send('game:closed', { code }));
+    launcher.on('error',   msg  => send('game:error',  { message: msg }));
+
+    try {
+      await launcher.launch(opts);
+      return { success: true };
+    } catch (e) {
+      log.error('game:launch:', e.message);
+      return { error: e.message };
+    }
+  });
+
+  ipcMain.handle('game:kill', () => launcher.kill());
+
+  ipcMain.on('updater:install', () => autoUpdater.quitAndInstall(false, true));
+  ipcMain.handle('updater:check', () => autoUpdater.checkForUpdates().catch(e => ({ error: e.message })));
+}
+
+function send(channel, data) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(channel, data);
+  }
+}
+
+function fmt(b = 0) {
+  if (b < 1024)          return b + ' B';
+  if (b < 1_048_576)     return (b / 1024).toFixed(1)       + ' KB';
+  if (b < 1_073_741_824) return (b / 1_048_576).toFixed(1)  + ' MB';
+  return (b / 1_073_741_824).toFixed(2) + ' GB';
+}
