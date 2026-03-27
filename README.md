@@ -1,160 +1,200 @@
-# ⚔ Y-Craft Лаунчер
+#!/usr/bin/env node
+/**
+ * ╔══════════════════════════════════════════════════════╗
+ *  Y-Craft — Генератор маніфесту модпаку
+ *  Запуск: node create-manifest.js
+ * ╚══════════════════════════════════════════════════════╝
+ *
+ * Що робить:
+ *  1. Сканує папки mods/, config/, resourcepacks/, shaderpacks/
+ *  2. Рахує SHA1 кожного файлу
+ *  3. Записує manifest.json який лаунчер використовує для авто-оновлень
+ *
+ * Після генерації:
+ *  - Завантаж всі файли на свій CDN/хостинг
+ *  - Заміни BASE_URL на реальну адресу
+ *  - Постав manifest.json на сервер оновлень
+ */
 
-Офіційний лаунчер для Y-Craft • Forge 1.20.1-47.4.10
+'use strict';
 
----
+const fs     = require('fs');
+const path   = require('path');
+const crypto = require('crypto');
+const https  = require('https');
+const http   = require('http');
 
-## 🚀 Швидкий старт (розробка)
+// ── НАЛАШТУВАННЯ ──────────────────────────────────────────
+const CONFIG = {
+  // Папка де лежать твої готові мод-файли (mods/, config/ тощо)
+  sourceDir: process.argv[2] || '.',
 
-```bash
-npm install
-npm start
-```
+  // Базова URL де будуть лежати файли після завантаження на хостинг
+  // Приклад: 'https://cdn.y-craft.net/modpack'
+  baseUrl: process.argv[3] || 'https://cdn.y-craft.net/modpack',
 
-### Збірка
-```bash
-npm run build:win    # .exe для Windows
-npm run build:linux  # AppImage для Linux
-npm run build:mac    # .dmg для macOS
-```
+  // Версія паку — збільшуй кожного разу коли змінюєш файли
+  packVersion: process.argv[4] || '1.0.0',
 
----
+  // Папки які включати в маніфест
+  includeDirs: ['mods', 'config', 'resourcepacks', 'shaderpacks'],
 
-## 📦 Як розмістити модпак та конфіги
+  // Розширення файлів які включати
+  includeExts: ['.jar', '.zip', '.toml', '.cfg', '.json', '.properties', '.txt', '.png'],
 
-### Варіант 1 — Власний HTTP-сервер (рекомендовано)
+  // Файли які НЕ включати
+  excludePatterns: [
+    /^\./, /~$/, /\.tmp$/, /desktop\.ini$/i, /thumbs\.db$/i,
+    /^__MACOSX/, /\.DS_Store$/,
+  ],
+};
+// ─────────────────────────────────────────────────────────
 
-**Структура сервера:**
-```
-https://cdn.y-craft.net/modpack/
-├── manifest.json          ← список файлів
-├── mods/
-│   ├── Create-0.5.1f.jar
-│   ├── JEI-1.20.1-15.2.0.jar
-│   └── ...
-└── config/
-    ├── create/
-    └── ...
-```
+async function main() {
+  console.log('\n╔══════════════════════════════════════════╗');
+  console.log(' Y-Craft — Генератор маніфесту модпаку');
+  console.log('╚══════════════════════════════════════════╝\n');
 
-**manifest.json:**
-```json
-{
-  "version": "2.1.0",
-  "mcVersion": "1.20.1",
-  "forgeVersion": "47.4.10",
-  "files": [
-    {
-      "name": "Create",
-      "path": "mods/Create-0.5.1f.jar",
-      "url": "https://cdn.y-craft.net/modpack/mods/Create-0.5.1f.jar",
-      "sha1": "abc123..."
-    },
-    {
-      "name": "create-config",
-      "path": "config/create/config.json",
-      "url": "https://cdn.y-craft.net/modpack/config/create/config.json",
-      "sha1": "def456..."
+  const sourceDir = path.resolve(CONFIG.sourceDir);
+  console.log(`📁 Джерело:    ${sourceDir}`);
+  console.log(`🌐 Базовий URL: ${CONFIG.baseUrl}`);
+  console.log(`📦 Версія паку: ${CONFIG.packVersion}\n`);
+
+  if (!fs.existsSync(sourceDir)) {
+    console.error(`❌ Папка не знайдена: ${sourceDir}`);
+    console.log('\nВикористання:');
+    console.log('  node create-manifest.js <шлях_до_папки_гри> <base_url> <версія>');
+    console.log('\nПриклад:');
+    console.log('  node create-manifest.js "C:/Users/Admin/AppData/Roaming/.ycraft" "https://cdn.y-craft.net/pack" "1.2.0"');
+    process.exit(1);
+  }
+
+  const files = [];
+  let totalSize = 0;
+
+  for (const dir of CONFIG.includeDirs) {
+    const fullDir = path.join(sourceDir, dir);
+    if (!fs.existsSync(fullDir)) {
+      console.log(`  ⏭  Пропуск (немає папки): ${dir}/`);
+      continue;
     }
-  ]
+
+    console.log(`  📂 Сканування: ${dir}/`);
+    const found = scanDir(fullDir, sourceDir);
+    console.log(`     → Знайдено ${found.length} файлів`);
+    files.push(...found);
+  }
+
+  console.log(`\n⏳ Рахуємо SHA1 для ${files.length} файлів…\n`);
+
+  const manifest = {
+    version:      CONFIG.packVersion,
+    mcVersion:    '1.20.1',
+    forgeVersion: '47.4.10',
+    generated:    new Date().toISOString(),
+    files:        [],
+  };
+
+  for (let i = 0; i < files.length; i++) {
+    const f    = files[i];
+    const sha1 = await hashFile(f.absPath);
+    const size = fs.statSync(f.absPath).size;
+    totalSize += size;
+
+    // Нормалізуємо шлях (завжди прямий слеш)
+    const relPath = f.relPath.replace(/\\/g, '/');
+
+    manifest.files.push({
+      name:  path.basename(f.absPath),
+      path:  relPath,
+      url:   `${CONFIG.baseUrl}/${relPath}`,
+      sha1,
+      size,
+    });
+
+    process.stdout.write(`\r  [${i + 1}/${files.length}] ${path.basename(f.absPath).slice(0, 50).padEnd(50)}`);
+  }
+
+  console.log('\n');
+
+  // Зберігаємо manifest.json
+  const outPath = path.join(sourceDir, 'modpack.json');
+  fs.writeFileSync(outPath, JSON.stringify(manifest, null, 2), 'utf8');
+
+  console.log('╔══════════════════════════════════════════╗');
+  console.log(' ✅  Маніфест успішно створено!');
+  console.log('╠══════════════════════════════════════════╣');
+  console.log(` 📄 Файл:      ${outPath}`);
+  console.log(` 📦 Файлів:    ${manifest.files.length}`);
+  console.log(` 💾 Розмір:    ${fmtSize(totalSize)}`);
+  console.log('╠══════════════════════════════════════════╣');
+  console.log(' Наступні кроки:');
+  console.log('');
+  console.log(' 1. Завантаж усі файли на твій CDN/хостинг:');
+  console.log(`    Структура папок має повторювати: ${CONFIG.baseUrl}/mods/...`);
+  console.log('');
+  console.log(' 2. Постав modpack.json на сервер оновлень:');
+  console.log(`    ${CONFIG.baseUrl.replace('/modpack', '')}/modpack/manifest.json`);
+  console.log('');
+  console.log(' 3. В src/main/main.js переконайся що:');
+  console.log(`    MODPACK_MANIFEST_URL = '${CONFIG.baseUrl.replace('/modpack', '')}/modpack/manifest.json'`);
+  console.log('╚══════════════════════════════════════════╝\n');
+
+  // Додатково — генеруємо upload-list.txt для зручності
+  const uploadList = manifest.files
+    .map(f => `${path.join(sourceDir, f.path.replace(/\//g, path.sep))}  →  ${f.url}`)
+    .join('\n');
+  const uploadPath = path.join(sourceDir, 'upload-list.txt');
+  fs.writeFileSync(uploadPath, uploadList, 'utf8');
+  console.log(`📋 Список для завантаження збережено: ${uploadPath}\n`);
 }
-```
 
-**Генерація SHA1 хешів:**
-```bash
-# Linux/macOS
-find mods/ config/ -type f | while read f; do
-  echo "$(sha1sum "$f" | cut -d' ' -f1)  $f"
-done
+// ── Рекурсивне сканування папки ───────────────────────────
+function scanDir(dir, baseDir) {
+  const results = [];
+  if (!fs.existsSync(dir)) return results;
 
-# Windows PowerShell
-Get-ChildItem -Recurse mods,config | ForEach-Object {
-  $hash = (Get-FileHash $_.FullName -Algorithm SHA1).Hash.ToLower()
-  "$hash  $($_.FullName)"
+  for (const entry of fs.readdirSync(dir)) {
+    // Перевіряємо виключення
+    if (CONFIG.excludePatterns.some(p => p.test(entry))) continue;
+
+    const fullPath = path.join(dir, entry);
+    const stat     = fs.statSync(fullPath);
+
+    if (stat.isDirectory()) {
+      results.push(...scanDir(fullPath, baseDir));
+    } else if (stat.isFile()) {
+      const ext = path.extname(entry).toLowerCase();
+      if (CONFIG.includeExts.includes(ext) || dir.includes('mods')) {
+        results.push({
+          absPath: fullPath,
+          relPath: path.relative(baseDir, fullPath),
+        });
+      }
+    }
+  }
+  return results;
 }
-```
 
-**В `src/main/main.js` вкажіть URL:**
-```js
-const MODPACK_MANIFEST_URL = 'https://cdn.y-craft.net/modpack/manifest.json';
-```
+// ── SHA1 хеш файлу ────────────────────────────────────────
+function hashFile(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash   = crypto.createHash('sha1');
+    const stream = fs.createReadStream(filePath);
+    stream.on('data', d => hash.update(d));
+    stream.on('end',  () => resolve(hash.digest('hex')));
+    stream.on('error', reject);
+  });
+}
 
----
+// ── Форматування розміру ──────────────────────────────────
+function fmtSize(bytes) {
+  if (bytes < 1_048_576)    return (bytes / 1024).toFixed(1)    + ' КБ';
+  if (bytes < 1_073_741_824) return (bytes / 1_048_576).toFixed(1) + ' МБ';
+  return (bytes / 1_073_741_824).toFixed(2) + ' ГБ';
+}
 
-### Варіант 2 — GitHub Releases (безкоштовно)
-
-1. Створіть репозиторій `ycraft-modpack`
-2. Запакуйте моди: `mods.zip`, конфіги: `config.zip`
-3. Зробіть Release з тегом `v2.1.0`
-4. В manifest.json використовуйте URL виду:
-   `https://github.com/YourOrg/ycraft-modpack/releases/download/v2.1.0/Create.jar`
-
----
-
-### Варіант 3 — Google Drive / Яндекс.Диск
-
-Для кожного файлу отримайте пряме посилання на завантаження:
-- Google Drive: `https://drive.google.com/uc?export=download&id=FILE_ID`
-- Яндекс.Диск: пряме посилання з кнопки "Скачати"
-
-**Увага:** великі файли з Google Drive можуть не завантажитись через підтвердження антивірусу.
-
----
-
-## ⚙ Налаштування лаунчера
-
-Всі константи в `src/main/main.js`:
-
-```js
-const FORGE_VERSION        = '47.4.10';          // версія Forge
-const MC_VERSION           = '1.20.1';           // версія Minecraft
-const MODPACK_MANIFEST_URL = 'https://...';      // URL маніфесту
-const UPDATE_FEED_URL      = 'https://...';      // URL оновлень лаунчера
-```
-
-Дефолтний IP сервера:
-```js
-defaults: { serverIP: 'play.y-craft.net', ... }
-```
-
----
-
-## 📁 Структура проєкту
-
-```
-ycraft-launcher/
-├── src/
-│   ├── main/
-│   │   ├── main.js            ← Electron main + IPC
-│   │   ├── preload.js         ← Context bridge
-│   │   ├── game-launcher.js   ← Запуск Minecraft
-│   │   ├── forge-installer.js ← Встановлення Forge
-│   │   └── modpack-manager.js ← Оновлення модпаку
-│   └── renderer/
-│       ├── index.html
-│       ├── style.css
-│       └── renderer.js
-├── assets/                    ← Іконки (додайте icon.png)
-└── package.json
-```
-
----
-
-## 🔧 Вимоги до системи гравця
-
-| Компонент | Мінімум |
-|---|---|
-| Java | 17+ (рекомендовано 21) |
-| RAM (ОС) | 4 ГБ |
-| RAM (гра) | 2–4 ГБ (налаштовується) |
-| ОС | Windows 10+, Ubuntu 20.04+, macOS 11+ |
-
-**Де скачати Java 21:**
-- https://adoptium.net/temurin/releases/?version=21
-- https://www.azul.com/downloads/?version=java-21
-
----
-
-## ⚖ Ліцензія
-
-MIT
+main().catch(e => {
+  console.error('\n❌ Помилка:', e.message);
+  process.exit(1);
+});

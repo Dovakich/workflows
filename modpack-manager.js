@@ -1,305 +1,224 @@
-<!DOCTYPE html>
-<html lang="uk">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Y-Craft Лаунчер</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700;900&family=Nunito:wght@300;400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css" />
-</head>
-<body>
+'use strict';
 
-<!-- ══════════════ ЗАГОЛОВОК ══════════════ -->
-<div id="titlebar">
-  <div class="titlebar-drag">
-    <span class="logo-text">Y-CRAFT</span>
-    <span class="version-badge">Forge 1.20.1 — 47.4.10</span>
-  </div>
-  <div class="titlebar-controls">
-    <button onclick="launcher.minimize()" title="Згорнути">─</button>
-    <button onclick="launcher.maximize()" title="Розгорнути">□</button>
-    <button onclick="launcher.close()" class="close-btn" title="Закрити">✕</button>
-  </div>
-</div>
+const { app, BrowserWindow, ipcMain, shell, dialog } = require('electron');
+const path = require('path');
+const fs   = require('fs');
+const { autoUpdater } = require('electron-updater');
+const log  = require('electron-log');
+const Store = require('electron-store');
 
-<!-- ══════════════ БІЧНА ПАНЕЛЬ ══════════════ -->
-<aside id="sidebar">
-  <nav>
-    <a href="#" class="nav-item active" data-tab="play" title="Грати">
-      <span class="nav-icon">▶</span>
-      <span class="nav-label">Грати</span>
-    </a>
-    <a href="#" class="nav-item" data-tab="mods" title="Моди">
-      <span class="nav-icon">⬡</span>
-      <span class="nav-label">Моди</span>
-    </a>
-    <a href="#" class="nav-item" data-tab="console" title="Консоль">
-      <span class="nav-icon">⌨</span>
-      <span class="nav-label">Лог</span>
-    </a>
-    <a href="#" class="nav-item" data-tab="settings" title="Налаштування">
-      <span class="nav-icon">⚙</span>
-      <span class="nav-label">Налаш.</span>
-    </a>
-  </nav>
-  <div class="sidebar-footer">
-    <div id="server-status">
-      <span class="status-dot" id="statusDot"></span>
-      <span id="statusText">Перевірка…</span>
-    </div>
-  </div>
-</aside>
+app.disableHardwareAcceleration();
+app.commandLine.appendSwitch('disable-gpu');
+app.commandLine.appendSwitch('disable-gpu-compositing');
+app.commandLine.appendSwitch('no-sandbox');
 
-<!-- ══════════════ ОСНОВНИЙ ВМІСТ ══════════════ -->
-<main id="content">
+log.transports.file.level = 'info';
+log.transports.console.level = 'warn';
+autoUpdater.logger = log;
 
-  <!-- ── ВКЛАДКА ГРАТИ ── -->
-  <div class="tab active" id="tab-play">
-    <div class="play-bg">
-      <div class="play-overlay"></div>
-      <canvas id="particleCanvas"></canvas>
-    </div>
+const store = new Store({
+  defaults: {
+    username:      '',
+    ram:           2048,
+    javaPath:      '',
+    gameDir:       path.join(app.getPath('appData'), '.ycraft'),
+    windowWidth:   1280,
+    windowHeight:  720,
+    fullscreen:    false,
+    closeOnLaunch: true,
+    serverIP:      'play.y-craft.net',
+    autoConnect:   false,
+    lastVersion:   ''
+  }
+});
 
-    <div class="play-content">
-      <div class="server-title">
-        <h1>Y-CRAFT</h1>
-        <p class="server-subtitle">Forge 1.20.1 — 47.4.10</p>
-      </div>
+const LAUNCHER_VERSION     = app.getVersion();
+const UPDATE_FEED_URL      = 'https://updates.y-craft.net/launcher';
+const MODPACK_MANIFEST_URL = 'https://updates.y-craft.net/modpack/manifest.json';
+const FORGE_VERSION        = '47.4.10';
+const MC_VERSION           = '1.20.1';
 
-      <div class="play-card">
-        <div class="nick-field">
-          <label for="nicknameInput">
-            <span class="field-icon">👤</span> Нікнейм
-          </label>
-          <input type="text" id="nicknameInput" placeholder="Введіть ваш нікнейм…"
-                 maxlength="16" autocomplete="off" spellcheck="false" />
-          <span class="nick-hint" id="nickHint"></span>
-        </div>
+let mainWindow = null;
 
-        <div class="quick-options">
-          <label class="toggle-wrap">
-            <input type="checkbox" id="autoConnectCheck" />
-            <span class="toggle"></span>
-            <span>Авто-підключення до сервера</span>
-          </label>
-        </div>
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width:           1060,
+    height:          640,
+    minWidth:        880,
+    minHeight:       560,
+    frame:           false,
+    transparent:     false,
+    backgroundColor: '#0d0f14',
+    resizable:       true,
+    icon:            path.join(__dirname, '../../assets/icon.png'),
+    webPreferences: {
+      preload:          path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration:  false
+    }
+  });
 
-        <!-- Прогрес-бар (прихований до потреби) -->
-        <div class="progress-wrap" id="progressWrap" style="display:none">
-          <div class="progress-label" id="progressLabel">Підготовка…</div>
-          <div class="progress-track">
-            <div class="progress-fill" id="progressFill"></div>
-          </div>
-          <div class="progress-sub" id="progressSub"></div>
-        </div>
+  mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
+  mainWindow.on('closed', () => { mainWindow = null; });
+}
 
-        <div class="play-buttons">
-          <button class="btn-launch" id="btnLaunch">
-            <span class="btn-icon">▶</span>
-            <span id="btnLaunchLabel">ГРАТИ</span>
-          </button>
-          <button class="btn-update" id="btnUpdate" title="Перевірити оновлення">
-            <span>↻</span>
-          </button>
-        </div>
+app.whenReady().then(() => {
+  createWindow();
+  setupAutoUpdater();
+  setupIPC();
+});
 
-        <div class="news-strip" id="newsStrip">
-          <span class="news-tag">НОВИНИ</span>
-          <span id="newsText">Ласкаво просимо на Y-Craft! Завантаження новин сервера…</span>
-        </div>
-      </div>
-    </div>
-  </div>
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit();
+});
+app.on('activate', () => {
+  if (BrowserWindow.getAllWindows().length === 0) createWindow();
+});
 
-  <!-- ── ВКЛАДКА МОДИ ── -->
-  <div class="tab" id="tab-mods">
-    <div class="tab-header">
-      <h2>Вміст <span class="accent">Модпаку</span></h2>
-      <div style="display:flex;gap:8px">
-        <button class="btn-small" id="btnOpenModsDir">📂 Папка модів</button>
-        <button class="btn-small" id="btnRefreshMods">↻ Оновити</button>
-      </div>
-    </div>
-    <div class="mod-stats" id="modStats">
-      <div class="stat-card">
-        <span class="stat-num" id="statModCount">—</span>
-        <span class="stat-label">Модів</span>
-      </div>
-      <div class="stat-card">
-        <span class="stat-num" id="statPackVersion">—</span>
-        <span class="stat-label">Версія паку</span>
-      </div>
-      <div class="stat-card">
-        <span class="stat-num">1.20.1</span>
-        <span class="stat-label">Версія MC</span>
-      </div>
-      <div class="stat-card">
-        <span class="stat-num">47.4.10</span>
-        <span class="stat-label">Forge</span>
-      </div>
-    </div>
-    <div class="mods-dir-row">
-      <span class="mods-dir-label">📁</span>
-      <span id="modsDirPath" class="mods-dir-path">—</span>
-    </div>
-    <div class="search-row">
-      <input type="text" id="modSearch" placeholder="🔍  Пошук за назвою, автором, ID…" />
-    </div>
-    <div class="mod-list" id="modList">
-      <div class="loading-placeholder">Натисніть «Оновити» щоб завантажити список модів</div>
-    </div>
-  </div>
+function setupAutoUpdater() {
+  if (process.env.NODE_ENV === 'development') return;
+  try {
+    autoUpdater.setFeedURL({ provider: 'generic', url: UPDATE_FEED_URL });
+    autoUpdater.on('checking-for-update',  () => send('updater:status', { status: 'checking' }));
+    autoUpdater.on('update-available',  i  => send('updater:status', { status: 'available', version: i.version }));
+    autoUpdater.on('update-not-available', () => send('updater:status', { status: 'latest' }));
+    autoUpdater.on('update-downloaded',    () => send('updater:status', { status: 'ready' }));
+    autoUpdater.on('error', err => {
+      log.warn('AutoUpdater:', err.message);
+      send('updater:status', { status: 'error', message: err.message });
+    });
+    autoUpdater.on('download-progress', p => send('updater:progress', {
+      percent:  Math.round(p.percent),
+      speed:    fmt(p.bytesPerSecond) + '/s',
+      total:    fmt(p.total),
+      received: fmt(p.transferred)
+    }));
+    autoUpdater.checkForUpdates().catch(() => {});
+    setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 30 * 60 * 1000);
+  } catch (e) {
+    log.warn('AutoUpdater init failed:', e.message);
+  }
+}
 
-  <!-- ── ВКЛАДКА КОНСОЛЬ ── -->
-  <div class="tab" id="tab-console">
-    <div class="tab-header">
-      <h2>Консоль <span class="accent">Гри</span></h2>
-      <div style="display:flex;gap:8px">
-        <button class="btn-small" id="btnClearConsole">🗑 Очистити</button>
-        <button class="btn-small" id="btnCopyConsole">📋 Копіювати</button>
-      </div>
-    </div>
-    <div class="console-wrap">
-      <pre id="consoleOutput"></pre>
-    </div>
-    <div class="console-status" id="consoleStatus">Гра не запущена</div>
-  </div>
+function setupIPC() {
+  const { GameLauncher }   = require('./game-launcher');
+  const { ModpackManager } = require('./modpack-manager');
+  const { ForgeInstaller } = require('./forge-installer');
 
-  <!-- ── ВКЛАДКА НАЛАШТУВАННЯ ── -->
-  <div class="tab" id="tab-settings">
-    <div class="tab-header">
-      <h2>Налаштування <span class="accent">Лаунчера</span></h2>
-      <button class="btn-save" id="btnSaveSettings">💾 Зберегти</button>
-    </div>
+  const gameDir   = store.get('gameDir');
+  const launcher  = new GameLauncher(store, log);
+  const modpack   = new ModpackManager(gameDir, MODPACK_MANIFEST_URL, log);
+  const forgeInst = new ForgeInstaller(gameDir, MC_VERSION, FORGE_VERSION, log);
 
-    <div class="settings-grid">
+  ipcMain.on('window:minimize', () => mainWindow?.minimize());
+  ipcMain.on('window:maximize', () => mainWindow?.isMaximized() ? mainWindow.unmaximize() : mainWindow?.maximize());
+  ipcMain.on('window:close',    () => mainWindow?.close());
 
-      <section class="settings-section">
-        <h3>🎮 Гра</h3>
+  ipcMain.handle('settings:get',    ()         => store.store);
+  ipcMain.handle('settings:set',    (_, k, v)  => { store.set(k, v); return true; });
+  ipcMain.handle('settings:setAll', (_, obj)   => { Object.entries(obj).forEach(([k,v]) => store.set(k,v)); return true; });
 
-        <div class="setting-row">
-          <label>Обсяг RAM</label>
-          <div class="ram-control">
-            <input type="range" id="ramSlider" min="512" max="16384" step="512" value="2048" />
-            <span class="ram-val" id="ramVal">2048 МБ</span>
-          </div>
-        </div>
+  ipcMain.handle('dialog:browseJava', async () => {
+    const r = await dialog.showOpenDialog(mainWindow, {
+      title: 'Оберіть виконуваний файл Java',
+      properties: ['openFile'],
+      filters: [{ name: 'Java', extensions: ['exe', ''] }]
+    });
+    return r.filePaths[0] || null;
+  });
 
-        <div class="setting-row">
-          <label>Розмір вікна</label>
-          <div class="input-pair">
-            <input type="number" id="winWidth"  value="1280" min="800"  placeholder="Ширина"  />
-            <span>×</span>
-            <input type="number" id="winHeight" value="720"  min="600"  placeholder="Висота" />
-          </div>
-        </div>
+  ipcMain.handle('dialog:browseGameDir', async () => {
+    const r = await dialog.showOpenDialog(mainWindow, {
+      title: 'Оберіть теку гри',
+      properties: ['openDirectory', 'createDirectory']
+    });
+    return r.filePaths[0] || null;
+  });
 
-        <div class="setting-row">
-          <label>На весь екран при запуску</label>
-          <label class="toggle-wrap">
-            <input type="checkbox" id="fullscreenCheck" />
-            <span class="toggle"></span>
-          </label>
-        </div>
+  ipcMain.handle('launcher:version',    () => LAUNCHER_VERSION);
+  ipcMain.handle('launcher:openGameDir', () => shell.openPath(store.get('gameDir')));
 
-        <div class="setting-row">
-          <label>Закрити лаунчер при запуску</label>
-          <label class="toggle-wrap">
-            <input type="checkbox" id="closeOnLaunchCheck" />
-            <span class="toggle"></span>
-          </label>
-        </div>
-      </section>
+  ipcMain.handle('mods:list', () => {
+    const modsDir = path.join(store.get('gameDir'), 'mods');
+    if (!fs.existsSync(modsDir)) return [];
+    try {
+      return fs.readdirSync(modsDir)
+        .filter(f => f.endsWith('.jar') && !f.endsWith('.disabled'))
+        .map(f => {
+          const stat = fs.statSync(path.join(modsDir, f));
+          return {
+            filename: f,
+            name:     f.replace(/[-_](\d[\d.]*)([-_]mc[\d.]*)?\.jar$/i, '').replace(/[-_]/g, ' ').trim() || f,
+            size:     fmt(stat.size),
+            mtime:    stat.mtime.toLocaleDateString('uk-UA')
+          };
+        })
+        .sort((a, b) => a.name.localeCompare(b.name, 'uk'));
+    } catch (e) {
+      log.warn('mods:list error:', e.message);
+      return [];
+    }
+  });
 
-      <section class="settings-section">
-        <h3>☕ Java</h3>
+  ipcMain.handle('modpack:check', async () => {
+    try { return await modpack.checkForUpdates(); }
+    catch (e) { return { error: e.message, upToDate: true, offline: true }; }
+  });
 
-        <div class="setting-row">
-          <label>Шлях до Java</label>
-          <div class="file-input-row">
-            <input type="text" id="javaPath" placeholder="Авто-визначення" readonly />
-            <button class="btn-browse" id="btnBrowseJava">Огляд</button>
-          </div>
-        </div>
+  ipcMain.handle('modpack:update', async () => {
+    modpack.removeAllListeners('progress');
+    modpack.removeAllListeners('status');
+    modpack.on('progress', d => send('modpack:progress', d));
+    modpack.on('status',   d => send('modpack:status',   d));
+    try { await modpack.update(); return { success: true }; }
+    catch (e) { return { error: e.message }; }
+  });
 
-        <div class="setting-row">
-          <label>Визначена версія</label>
-          <span class="setting-info" id="javaVersion">Перевірка…</span>
-        </div>
-      </section>
+  ipcMain.handle('forge:check', () => forgeInst.isInstalled());
 
-      <section class="settings-section">
-        <h3>📁 Шляхи</h3>
+  ipcMain.handle('forge:install', async () => {
+    forgeInst.removeAllListeners('progress');
+    forgeInst.removeAllListeners('status');
+    forgeInst.on('progress', d => send('forge:progress', d));
+    forgeInst.on('status',   d => send('forge:status',   d));
+    forgeInst.setJavaPath(store.get('javaPath') || '');
+    try { await forgeInst.install(); return { success: true }; }
+    catch (e) { log.error('forge:install:', e.message); return { error: e.message }; }
+  });
 
-        <div class="setting-row">
-          <label>Тека гри</label>
-          <div class="file-input-row">
-            <input type="text" id="gameDir" placeholder=".ycraft" readonly />
-            <button class="btn-browse" id="btnBrowseDir">Огляд</button>
-          </div>
-        </div>
+  ipcMain.handle('game:launch', async (_, opts) => {
+    launcher.removeAllListeners();
 
-        <div class="setting-row">
-          <label>Відкрити теку</label>
-          <button class="btn-small" id="btnOpenDir">📂 Відкрити теку гри</button>
-        </div>
-      </section>
+    launcher.on('stdout',  line => send('game:stdout', line));
+    launcher.on('stderr',  line => send('game:stderr', line));
+    launcher.on('started', ()   => send('game:started', {}));
+    launcher.on('closed',  code => send('game:closed', { code }));
+    launcher.on('error',   msg  => send('game:error',  { message: msg }));
 
-      <section class="settings-section">
-        <h3>🌐 Сервер</h3>
+    try {
+      await launcher.launch(opts);
+      return { success: true };
+    } catch (e) {
+      log.error('game:launch:', e.message);
+      return { error: e.message };
+    }
+  });
 
-        <div class="setting-row">
-          <label>IP сервера</label>
-          <input type="text" id="serverIP" placeholder="play.y-craft.net" />
-        </div>
+  ipcMain.handle('game:kill', () => launcher.kill());
 
-        <div class="setting-row">
-          <label>Авто-підключення при старті</label>
-          <label class="toggle-wrap">
-            <input type="checkbox" id="autoConnectSetting" />
-            <span class="toggle"></span>
-          </label>
-        </div>
-      </section>
+  ipcMain.on('updater:install', () => autoUpdater.quitAndInstall(false, true));
+  ipcMain.handle('updater:check', () => autoUpdater.checkForUpdates().catch(e => ({ error: e.message })));
+}
 
-      <section class="settings-section">
-        <h3>🔄 Оновлення</h3>
+function send(channel, data) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(channel, data);
+  }
+}
 
-        <div class="setting-row">
-          <label>Версія лаунчера</label>
-          <span class="setting-info" id="launcherVersion">—</span>
-        </div>
-
-        <div class="setting-row">
-          <label>Перевірити оновлення лаунчера</label>
-          <button class="btn-small" id="btnCheckUpdate">↻ Перевірити</button>
-        </div>
-
-        <div id="updateNotice" class="update-notice" style="display:none"></div>
-      </section>
-
-    </div>
-  </div>
-
-</main>
-
-<!-- ══════════════ СПОВІЩЕННЯ ══════════════ -->
-<div id="toastContainer"></div>
-
-<!-- ══════════════ МОДАЛЬНЕ ВІКНО ══════════════ -->
-<div id="modal" class="modal-overlay" style="display:none">
-  <div class="modal-box">
-    <h3 id="modalTitle">Повідомлення</h3>
-    <p  id="modalBody"></p>
-    <div class="modal-btns">
-      <button class="btn-modal-cancel" id="modalCancel">Скасувати</button>
-      <button class="btn-modal-ok"     id="modalOk">ОК</button>
-    </div>
-  </div>
-</div>
-
-<script src="renderer.js"></script>
-</body>
-</html>
+function fmt(b = 0) {
+  if (b < 1024)          return b + ' B';
+  if (b < 1_048_576)     return (b / 1024).toFixed(1)       + ' KB';
+  if (b < 1_073_741_824) return (b / 1_048_576).toFixed(1)  + ' MB';
+  return (b / 1_073_741_824).toFixed(2) + ' GB';
+}

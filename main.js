@@ -1,605 +1,305 @@
-'use strict';
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Y-Craft Лаунчер</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700;900&family=Nunito:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
 
-let settings    = {};
-let gameRunning = false;
-let consoleLines = [];
-let progressTimeout = null;
+<!-- ══════════════ ЗАГОЛОВОК ══════════════ -->
+<div id="titlebar">
+  <div class="titlebar-drag">
+    <span class="logo-text">Y-CRAFT</span>
+    <span class="version-badge">Forge 1.20.1 — 47.4.10</span>
+  </div>
+  <div class="titlebar-controls">
+    <button onclick="launcher.minimize()" title="Згорнути">─</button>
+    <button onclick="launcher.maximize()" title="Розгорнути">□</button>
+    <button onclick="launcher.close()" class="close-btn" title="Закрити">✕</button>
+  </div>
+</div>
 
-const $ = id => document.getElementById(id);
-
-document.addEventListener('DOMContentLoaded', async () => {
-  await loadSettings();
-  setupTabs();
-  setupPlayTab();
-  setupModsTab();
-  setupSettingsTab();
-  setupConsoleTab();
-  setupIPCListeners();
-  startParticles();
-  checkServerStatus();
-  setInterval(checkServerStatus, 60_000);
-});
-
-async function loadSettings() {
-  settings = await launcher.getSettings();
-  $('nicknameInput').value        = settings.username     || '';
-  $('autoConnectCheck').checked   = settings.autoConnect  || false;
-  $('ramSlider').value            = settings.ram          || 2048;
-  $('ramVal').textContent         = (settings.ram || 2048) + ' МБ';
-  $('winWidth').value             = settings.windowWidth  || 1280;
-  $('winHeight').value            = settings.windowHeight || 720;
-  $('fullscreenCheck').checked    = settings.fullscreen   || false;
-  $('closeOnLaunchCheck').checked = settings.closeOnLaunch !== false;
-  $('javaPath').value             = settings.javaPath     || '';
-  $('gameDir').value              = settings.gameDir      || '';
-  $('serverIP').value             = settings.serverIP     || 'play.y-craft.net';
-  $('autoConnectSetting').checked = settings.autoConnect  || false;
-  const ver = await launcher.getVersion();
-  $('launcherVersion').textContent = 'v' + ver;
-}
-
-function setupTabs() {
-  document.querySelectorAll('.nav-item').forEach(el => {
-    el.addEventListener('click', e => {
-      e.preventDefault();
-      const tab = el.dataset.tab;
-      document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-      el.classList.add('active');
-      $('tab-' + tab).classList.add('active');
-      if (tab === 'mods') loadModsTab();
-    });
-  });
-}
-
-function setupPlayTab() {
-  const nickInput = $('nicknameInput');
-
-  nickInput.addEventListener('input', () => {
-    const val   = nickInput.value.trim();
-    const valid = /^[A-Za-z0-9_]{3,16}$/.test(val);
-    nickInput.classList.toggle('valid',   val.length > 0 && valid);
-    nickInput.classList.toggle('invalid', val.length > 0 && !valid);
-    $('nickHint').textContent = val.length > 0 && !valid
-      ? '3–16 символів: лише латинські літери, цифри та _' : '';
-  });
-
-  if (settings.username) {
-    nickInput.value = settings.username;
-    nickInput.dispatchEvent(new Event('input'));
-  }
-
-  $('autoConnectCheck').addEventListener('change', () => {
-    launcher.setSetting('autoConnect', $('autoConnectCheck').checked);
-    $('autoConnectSetting').checked = $('autoConnectCheck').checked;
-  });
-
-  $('btnLaunch').addEventListener('click', async () => {
-    if (gameRunning) return killGame();
-    await startGame();
-  });
-
-  $('btnUpdate').addEventListener('click', async () => {
-    const btn = $('btnUpdate');
-    btn.disabled = true;
-    btn.textContent = '…';
-    await runModpackUpdate();
-    btn.disabled = false;
-    btn.textContent = '↻';
-  });
-
-  loadNews();
-}
-
-async function startGame() {
-  const nick = $('nicknameInput').value.trim();
-  if (!nick || !/^[A-Za-z0-9_]{3,16}$/.test(nick)) {
-    toast('Введіть коректний нікнейм (3–16 символів: латинські літери, цифри, _)', 'error');
-    $('nicknameInput').focus();
-    return;
-  }
-
-  await launcher.setSetting('username', nick);
-  settings.username = nick;
-
-  try {
-
-    showProgress('Перевірка встановлення Forge…', 0);
-
-    const forgeInstalled = await launcher.checkForge();
-
-    if (!forgeInstalled) {
-      const ok = await showModal(
-        'Встановлення Forge',
-        'Forge 1.20.1-47.4.10 не встановлено.\n\n' +
-        'Буде завантажено: Minecraft 1.20.1, ігрові ресурси, бібліотеки та Forge.\n' +
-        'Розмір: ~500–900 МБ. Час: 5–15 хвилин.\n\n' +
-        'Продовжити?'
-      );
-      if (!ok) { hideProgress(); return; }
-
-      showProgress('Встановлення Forge 1.20.1-47.4.10…', 2);
-      const r = await launcher.installForge();
-      if (r.error) {
-        toast('Помилка встановлення Forge: ' + r.error, 'error');
-        appendConsole('[ПОМИЛКА] ' + r.error, true);
-        hideProgress();
-        return;
-      }
-      toast('Forge успішно встановлено!', 'success');
-    }
-
-    showProgress('Перевірка модпаку…', 20);
-    const modCheck = await launcher.checkModpack();
-
-    if (!modCheck.upToDate && !modCheck.offline && !modCheck.error) {
-      showProgress(`Оновлення модпаку (v${modCheck.remoteVersion})…`, 25);
-      const r = await launcher.updateModpack();
-      if (r.error) {
-        toast('Помилка оновлення модпаку: ' + r.error, 'warning');
-      }
-    }
-
-    showProgress('Запуск Minecraft…', 95);
-    setLaunchBtn('launching');
-
-    clearTimeout(progressTimeout);
-    progressTimeout = setTimeout(() => {
-      if ($('progressWrap').style.display !== 'none') {
-        hideProgress();
-        setLaunchBtn('idle');
-        toast('Час очікування вичерпано. Перевірте консоль.', 'warning');
-      }
-    }, 60_000);
-
-    const result = await launcher.launch({
-      username:    nick,
-      ram:         settings.ram,
-      javaPath:    settings.javaPath,
-      width:       settings.windowWidth,
-      height:      settings.windowHeight,
-      autoConnect: $('autoConnectCheck').checked
-    });
-
-    if (result.error) {
-      clearTimeout(progressTimeout);
-      toast('Помилка запуску: ' + result.error, 'error');
-      appendConsole('[ПОМИЛКА] ' + result.error, true);
-      setLaunchBtn('idle');
-      hideProgress();
-    }
-
-  } catch (err) {
-    clearTimeout(progressTimeout);
-    toast('Несподівана помилка: ' + err.message, 'error');
-    appendConsole('[ПОМИЛКА] ' + err.message, true);
-    setLaunchBtn('idle');
-    hideProgress();
-  }
-}
-
-function killGame() {
-  launcher.kill();
-  toast('Процес гри завершено', 'warning');
-  setLaunchBtn('idle');
-  hideProgress();
-}
-
-function setLaunchBtn(state) {
-  const btn   = $('btnLaunch');
-  const label = $('btnLaunchLabel');
-  btn.classList.remove('running');
-  btn.disabled  = false;
-  gameRunning   = false;
-
-  if (state === 'launching') {
-    btn.disabled = true;
-    label.textContent = 'ЗАПУСК…';
-  } else if (state === 'running') {
-    btn.classList.add('running');
-    gameRunning = true;
-    btn.disabled = false;
-    label.textContent = 'ГРАЄ  ■ ЗУПИНИТИ';
-  } else {
-    label.textContent = 'ГРАТИ';
-  }
-}
-
-function showProgress(label, pct) {
-  $('progressWrap').style.display = 'flex';
-  $('progressLabel').textContent  = label;
-  $('progressFill').style.width   = Math.max(2, pct) + '%';
-  $('progressSub').textContent    = '';
-  $('btnLaunch').disabled         = true;
-}
-
-function updateProgress(pct, sub) {
-  $('progressFill').style.width = Math.max(2, pct) + '%';
-  if (sub !== undefined) $('progressSub').textContent = sub;
-}
-
-function hideProgress() {
-  clearTimeout(progressTimeout);
-  $('progressWrap').style.display = 'none';
-  if (!gameRunning) $('btnLaunch').disabled = false;
-}
-
-async function runModpackUpdate() {
-  showProgress('Перевірка оновлень…', 5);
-  const check = await launcher.checkModpack();
-
-  if (check.upToDate) {
-    toast('Модпак вже актуальний!', 'success');
-    hideProgress(); return;
-  }
-  if (check.offline || check.error) {
-    toast('Сервер оновлень недоступний', 'warning');
-    hideProgress(); return;
-  }
-
-  showProgress(`Завантаження модпаку v${check.remoteVersion}…`, 10);
-  const r = await launcher.updateModpack();
-  hideProgress();
-
-  if (r.error) {
-    toast('Помилка оновлення: ' + r.error, 'error');
-  } else {
-    toast('Модпак оновлено!', 'success');
-
-    if ($('tab-mods').classList.contains('active')) loadModsTab();
-  }
-}
-
-function loadNews() {
-  const items = [
-    'Ласкаво просимо на Y-Craft! Заходьте на play.y-craft.net',
-    'Нове оновлення: Модпак v2.1 — додано 5 нових модів!',
-    'Подія вихідних: подвійний досвід у суботу та неділю!'
-  ];
-  let i = 0;
-  const cycle = () => { $('newsText').textContent = items[i++ % items.length]; };
-  cycle();
-  setInterval(cycle, 8_000);
-}
-
-async function loadModsTab() {
-  const list = $('modList');
-  list.innerHTML = '<div class="loading-placeholder">Завантаження списку модів…</div>';
-
-  try {
-
-    const mods = await launcher.listMods();
-
-    $('statModCount').textContent = mods.length;
-
-    try {
-      const check = await launcher.checkModpack();
-      $('statPackVersion').textContent = check.remoteVersion || check.version || 'локальний';
-    } catch {
-      $('statPackVersion').textContent = 'N/A';
-    }
-
-    if (!mods.length) {
-      list.innerHTML = `
-        <div class="loading-placeholder">
-          <div style="margin-bottom:8px">📭 Папка mods/ порожня або не існує</div>
-          <div style="font-size:11px;color:var(--text-muted)">
-            Шлях: ${(settings.gameDir || '?') + '/mods'}
-          </div>
-        </div>`;
-      return;
-    }
-
-    renderModList(mods, $('modSearch').value);
-
-  } catch (e) {
-    list.innerHTML = `<div class="loading-placeholder" style="color:var(--red)">Помилка: ${esc(e.message)}</div>`;
-  }
-}
-
-function renderModList(mods, filter = '') {
-  const q    = filter.toLowerCase();
-  const shown = q ? mods.filter(m => m.name.toLowerCase().includes(q) || m.filename.toLowerCase().includes(q)) : mods;
-  const list  = $('modList');
-
-  if (!shown.length) {
-    list.innerHTML = '<div class="loading-placeholder">Нічого не знайдено</div>';
-    return;
-  }
-
-  list.innerHTML = shown.map((m, i) => `
-    <div class="mod-item">
-      <span class="mod-icon">${modIcon(m.filename)}</span>
-      <div class="mod-info">
-        <div class="mod-name">${esc(m.name)}</div>
-        <div class="mod-version">${esc(m.filename)} · ${esc(m.size)}</div>
-      </div>
-      <span class="mod-badge required">Встановлено</span>
+<!-- ══════════════ БІЧНА ПАНЕЛЬ ══════════════ -->
+<aside id="sidebar">
+  <nav>
+    <a href="#" class="nav-item active" data-tab="play" title="Грати">
+      <span class="nav-icon">▶</span>
+      <span class="nav-label">Грати</span>
+    </a>
+    <a href="#" class="nav-item" data-tab="mods" title="Моди">
+      <span class="nav-icon">⬡</span>
+      <span class="nav-label">Моди</span>
+    </a>
+    <a href="#" class="nav-item" data-tab="console" title="Консоль">
+      <span class="nav-icon">⌨</span>
+      <span class="nav-label">Лог</span>
+    </a>
+    <a href="#" class="nav-item" data-tab="settings" title="Налаштування">
+      <span class="nav-icon">⚙</span>
+      <span class="nav-label">Налаш.</span>
+    </a>
+  </nav>
+  <div class="sidebar-footer">
+    <div id="server-status">
+      <span class="status-dot" id="statusDot"></span>
+      <span id="statusText">Перевірка…</span>
     </div>
-  `).join('');
-}
+  </div>
+</aside>
 
-function modIcon(filename) {
-  const n = filename.toLowerCase();
-  if (n.includes('create'))    return '⚙';
-  if (n.includes('ae2') || n.includes('appliedenergistics')) return '⚡';
-  if (n.includes('thermal'))   return '🔥';
-  if (n.includes('biome'))     return '🌿';
-  if (n.includes('jei'))       return '📖';
-  if (n.includes('waystone'))  return '🪨';
-  if (n.includes('tinker'))    return '⚒';
-  if (n.includes('botania'))   return '🌸';
-  if (n.includes('chest') || n.includes('iron')) return '📦';
-  if (n.includes('xaero') || n.includes('minimap') || n.includes('worldmap')) return '🗺';
-  if (n.includes('optifine') || n.includes('optifinefabric')) return '🎨';
-  if (n.includes('jer') || n.includes('resources')) return '💎';
-  if (n.includes('sort') || n.includes('inventory')) return '📋';
-  if (n.includes('forge'))     return '🔨';
-  if (n.includes('journeymap')) return '🌍';
-  if (n.includes('waila') || n.includes('hwyla') || n.includes('jade')) return '🔍';
-  if (n.includes('storage'))   return '🗄';
-  if (n.includes('mekanism'))  return '⚗';
-  if (n.includes('immersive')) return '🏭';
-  if (n.includes('pam') || n.includes('food') || n.includes('harvest')) return '🌾';
-  return '🧩';
-}
+<!-- ══════════════ ОСНОВНИЙ ВМІСТ ══════════════ -->
+<main id="content">
 
-function setupModsTab() {
-  $('btnRefreshMods').addEventListener('click', loadModsTab);
-  $('modSearch').addEventListener('input', async () => {
-    const mods = await launcher.listMods();
-    renderModList(mods, $('modSearch').value);
-  });
-}
+  <!-- ── ВКЛАДКА ГРАТИ ── -->
+  <div class="tab active" id="tab-play">
+    <div class="play-bg">
+      <div class="play-overlay"></div>
+      <canvas id="particleCanvas"></canvas>
+    </div>
 
-function setupConsoleTab() {
-  $('btnClearConsole').addEventListener('click', () => {
-    consoleLines = [];
-    $('consoleOutput').textContent = '';
-  });
-  $('btnCopyConsole').addEventListener('click', () => {
-    navigator.clipboard.writeText(consoleLines.join('\n'))
-      .then(() => toast('Консоль скопійовано', 'info'))
-      .catch(() => toast('Не вдалося скопіювати', 'error'));
-  });
-}
+    <div class="play-content">
+      <div class="server-title">
+        <h1>Y-CRAFT</h1>
+        <p class="server-subtitle">Forge 1.20.1 — 47.4.10</p>
+      </div>
 
-function appendConsole(line, isErr = false) {
-  if (!line) return;
-  consoleLines.push(line);
-  if (consoleLines.length > 5000) consoleLines.shift();
+      <div class="play-card">
+        <div class="nick-field">
+          <label for="nicknameInput">
+            <span class="field-icon">👤</span> Нікнейм
+          </label>
+          <input type="text" id="nicknameInput" placeholder="Введіть ваш нікнейм…"
+                 maxlength="16" autocomplete="off" spellcheck="false" />
+          <span class="nick-hint" id="nickHint"></span>
+        </div>
 
-  const pre = $('consoleOutput');
-  const el  = document.createElement('span');
-  el.textContent = line + '\n';
-  if (isErr) el.style.color = '#e07070';
-  pre.appendChild(el);
+        <div class="quick-options">
+          <label class="toggle-wrap">
+            <input type="checkbox" id="autoConnectCheck" />
+            <span class="toggle"></span>
+            <span>Авто-підключення до сервера</span>
+          </label>
+        </div>
 
-  while (pre.children.length > 5000) pre.removeChild(pre.firstChild);
+        <!-- Прогрес-бар (прихований до потреби) -->
+        <div class="progress-wrap" id="progressWrap" style="display:none">
+          <div class="progress-label" id="progressLabel">Підготовка…</div>
+          <div class="progress-track">
+            <div class="progress-fill" id="progressFill"></div>
+          </div>
+          <div class="progress-sub" id="progressSub"></div>
+        </div>
 
-  const wrap = pre.parentElement;
-  wrap.scrollTop = wrap.scrollHeight;
-}
+        <div class="play-buttons">
+          <button class="btn-launch" id="btnLaunch">
+            <span class="btn-icon">▶</span>
+            <span id="btnLaunchLabel">ГРАТИ</span>
+          </button>
+          <button class="btn-update" id="btnUpdate" title="Перевірити оновлення">
+            <span>↻</span>
+          </button>
+        </div>
 
-function setupSettingsTab() {
-  $('ramSlider').addEventListener('input', () => {
-    $('ramVal').textContent = $('ramSlider').value + ' МБ';
-  });
+        <div class="news-strip" id="newsStrip">
+          <span class="news-tag">НОВИНИ</span>
+          <span id="newsText">Ласкаво просимо на Y-Craft! Завантаження новин сервера…</span>
+        </div>
+      </div>
+    </div>
+  </div>
 
-  $('btnBrowseJava').addEventListener('click', async () => {
-    const p = await launcher.browseJava();
-    if (p) { $('javaPath').value = p; launcher.setSetting('javaPath', p); toast('Шлях до Java оновлено', 'success'); }
-  });
+  <!-- ── ВКЛАДКА МОДИ ── -->
+  <div class="tab" id="tab-mods">
+    <div class="tab-header">
+      <h2>Вміст <span class="accent">Модпаку</span></h2>
+      <div style="display:flex;gap:8px">
+        <button class="btn-small" id="btnOpenModsDir">📂 Папка модів</button>
+        <button class="btn-small" id="btnRefreshMods">↻ Оновити</button>
+      </div>
+    </div>
+    <div class="mod-stats" id="modStats">
+      <div class="stat-card">
+        <span class="stat-num" id="statModCount">—</span>
+        <span class="stat-label">Модів</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-num" id="statPackVersion">—</span>
+        <span class="stat-label">Версія паку</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-num">1.20.1</span>
+        <span class="stat-label">Версія MC</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-num">47.4.10</span>
+        <span class="stat-label">Forge</span>
+      </div>
+    </div>
+    <div class="mods-dir-row">
+      <span class="mods-dir-label">📁</span>
+      <span id="modsDirPath" class="mods-dir-path">—</span>
+    </div>
+    <div class="search-row">
+      <input type="text" id="modSearch" placeholder="🔍  Пошук за назвою, автором, ID…" />
+    </div>
+    <div class="mod-list" id="modList">
+      <div class="loading-placeholder">Натисніть «Оновити» щоб завантажити список модів</div>
+    </div>
+  </div>
 
-  $('btnBrowseDir').addEventListener('click', async () => {
-    const p = await launcher.browseGameDir();
-    if (p) { $('gameDir').value = p; launcher.setSetting('gameDir', p); toast('Теку гри оновлено', 'success'); }
-  });
+  <!-- ── ВКЛАДКА КОНСОЛЬ ── -->
+  <div class="tab" id="tab-console">
+    <div class="tab-header">
+      <h2>Консоль <span class="accent">Гри</span></h2>
+      <div style="display:flex;gap:8px">
+        <button class="btn-small" id="btnClearConsole">🗑 Очистити</button>
+        <button class="btn-small" id="btnCopyConsole">📋 Копіювати</button>
+      </div>
+    </div>
+    <div class="console-wrap">
+      <pre id="consoleOutput"></pre>
+    </div>
+    <div class="console-status" id="consoleStatus">Гра не запущена</div>
+  </div>
 
-  $('btnOpenDir').addEventListener('click', () => launcher.openGameDir());
-  $('btnSaveSettings').addEventListener('click', saveSettings);
+  <!-- ── ВКЛАДКА НАЛАШТУВАННЯ ── -->
+  <div class="tab" id="tab-settings">
+    <div class="tab-header">
+      <h2>Налаштування <span class="accent">Лаунчера</span></h2>
+      <button class="btn-save" id="btnSaveSettings">💾 Зберегти</button>
+    </div>
 
-  $('autoConnectSetting').addEventListener('change', () => {
-    $('autoConnectCheck').checked = $('autoConnectSetting').checked;
-  });
+    <div class="settings-grid">
 
-  $('btnCheckUpdate').addEventListener('click', async () => {
-    $('btnCheckUpdate').textContent = 'Перевірка…';
-    await launcher.checkUpdate();
-    $('btnCheckUpdate').textContent = '↻ Перевірити';
-  });
+      <section class="settings-section">
+        <h3>🎮 Гра</h3>
 
-  $('javaVersion').textContent = settings.javaPath ? 'Вказано власний шлях' : 'Авто-визначення';
-}
+        <div class="setting-row">
+          <label>Обсяг RAM</label>
+          <div class="ram-control">
+            <input type="range" id="ramSlider" min="512" max="16384" step="512" value="2048" />
+            <span class="ram-val" id="ramVal">2048 МБ</span>
+          </div>
+        </div>
 
-async function saveSettings() {
-  await launcher.setSettings({
-    ram:           parseInt($('ramSlider').value),
-    windowWidth:   parseInt($('winWidth').value),
-    windowHeight:  parseInt($('winHeight').value),
-    fullscreen:    $('fullscreenCheck').checked,
-    closeOnLaunch: $('closeOnLaunchCheck').checked,
-    javaPath:      $('javaPath').value,
-    serverIP:      $('serverIP').value,
-    autoConnect:   $('autoConnectSetting').checked
-  });
-  settings = await launcher.getSettings();
-  toast('Налаштування збережено!', 'success');
-}
+        <div class="setting-row">
+          <label>Розмір вікна</label>
+          <div class="input-pair">
+            <input type="number" id="winWidth"  value="1280" min="800"  placeholder="Ширина"  />
+            <span>×</span>
+            <input type="number" id="winHeight" value="720"  min="600"  placeholder="Висота" />
+          </div>
+        </div>
 
-function setupIPCListeners() {
+        <div class="setting-row">
+          <label>На весь екран при запуску</label>
+          <label class="toggle-wrap">
+            <input type="checkbox" id="fullscreenCheck" />
+            <span class="toggle"></span>
+          </label>
+        </div>
 
-  launcher.onStarted(() => {
-    clearTimeout(progressTimeout);
-    setLaunchBtn('running');
-    hideProgress();
-    $('consoleStatus').textContent = '● Гра запущена';
-    $('consoleStatus').style.color = 'var(--green)';
-    appendConsole('[Launcher] Гру успішно запущено');
-    if (settings.closeOnLaunch) launcher.close();
-  });
+        <div class="setting-row">
+          <label>Закрити лаунчер при запуску</label>
+          <label class="toggle-wrap">
+            <input type="checkbox" id="closeOnLaunchCheck" />
+            <span class="toggle"></span>
+          </label>
+        </div>
+      </section>
 
-  launcher.onClosed(({ code }) => {
-    clearTimeout(progressTimeout);
-    setLaunchBtn('idle');
-    hideProgress();
-    $('consoleStatus').textContent = `Гру закрито (код: ${code})`;
-    $('consoleStatus').style.color = 'var(--text-muted)';
-    appendConsole(`[Launcher] Гру закрито, код виходу: ${code}`);
+      <section class="settings-section">
+        <h3>☕ Java</h3>
 
-    if ($('tab-mods').classList.contains('active')) loadModsTab();
-  });
+        <div class="setting-row">
+          <label>Шлях до Java</label>
+          <div class="file-input-row">
+            <input type="text" id="javaPath" placeholder="Авто-визначення" readonly />
+            <button class="btn-browse" id="btnBrowseJava">Огляд</button>
+          </div>
+        </div>
 
-  launcher.onError(({ message }) => {
-    clearTimeout(progressTimeout);
-    setLaunchBtn('idle');
-    hideProgress();
-    toast('Помилка гри: ' + message, 'error');
-    appendConsole('[ПОМИЛКА] ' + message, true);
-  });
+        <div class="setting-row">
+          <label>Визначена версія</label>
+          <span class="setting-info" id="javaVersion">Перевірка…</span>
+        </div>
+      </section>
 
-  launcher.onStdout(line => appendConsole(line));
-  launcher.onStderr(line => {
+      <section class="settings-section">
+        <h3>📁 Шляхи</h3>
 
-    if (line.includes('LWJGL') && line.includes('version')) return;
-    appendConsole(line, line.toLowerCase().includes('error') || line.toLowerCase().includes('exception'));
-  });
+        <div class="setting-row">
+          <label>Тека гри</label>
+          <div class="file-input-row">
+            <input type="text" id="gameDir" placeholder=".ycraft" readonly />
+            <button class="btn-browse" id="btnBrowseDir">Огляд</button>
+          </div>
+        </div>
 
-  launcher.onForgeProgress(data => {
-    const pct = 5 + Math.round((data.percent || 0) * 0.9);
-    updateProgress(pct);
-    if (data.received && data.total) {
-      $('progressSub').textContent = `${data.file} — ${data.received} / ${data.total}`;
-    } else if (data.message) {
-      $('progressSub').textContent = data.message.slice(0, 80);
-    }
-  });
+        <div class="setting-row">
+          <label>Відкрити теку</label>
+          <button class="btn-small" id="btnOpenDir">📂 Відкрити теку гри</button>
+        </div>
+      </section>
 
-  launcher.onForgeStatus(data => {
-    if (data.message) {
-      $('progressLabel').textContent = data.message;
-      if (data.done) hideProgress();
-    }
-  });
+      <section class="settings-section">
+        <h3>🌐 Сервер</h3>
 
-  launcher.onModpackProgress(data => {
-    const pct = 25 + Math.round((data.percent || 0) * 0.7);
-    updateProgress(pct);
-    if (data.received && data.total) {
-      $('progressSub').textContent = `${data.file} — ${data.received} / ${data.total}`;
-    } else if (data.file) {
-      $('progressSub').textContent = data.file;
-    }
-  });
+        <div class="setting-row">
+          <label>IP сервера</label>
+          <input type="text" id="serverIP" placeholder="play.y-craft.net" />
+        </div>
 
-  launcher.onModpackStatus(data => {
-    if (data.message) $('progressLabel').textContent = data.message;
-  });
+        <div class="setting-row">
+          <label>Авто-підключення при старті</label>
+          <label class="toggle-wrap">
+            <input type="checkbox" id="autoConnectSetting" />
+            <span class="toggle"></span>
+          </label>
+        </div>
+      </section>
 
-  launcher.onUpdaterStatus(data => {
-    const notice = $('updateNotice');
-    if (data.status === 'available') {
-      notice.style.display = 'block';
-      notice.className     = 'update-notice';
-      notice.innerHTML     = `🆕 Доступне оновлення лаунчера v${data.version}!
-        <button class="btn-small" onclick="launcher.installUpdate()" style="margin-left:10px">Встановити та перезапустити</button>`;
-      toast(`Доступне оновлення v${data.version}!`, 'info');
-    } else if (data.status === 'ready') {
-      notice.style.display = 'block';
-      notice.innerHTML = '✅ Оновлення завантажено. <button class="btn-small" onclick="launcher.installUpdate()">Перезапустити</button>';
-    } else if (data.status === 'error') {
-      notice.style.display = 'block';
-      notice.className     = 'update-notice error';
-      notice.textContent   = 'Помилка оновлення: ' + data.message;
-    }
-  });
+      <section class="settings-section">
+        <h3>🔄 Оновлення</h3>
 
-  launcher.onUpdaterProgress(data => {
-    const n = $('updateNotice');
-    n.style.display = 'block';
-    n.textContent = `Завантаження оновлення: ${data.percent}% (${data.received} / ${data.total})`;
-  });
-}
+        <div class="setting-row">
+          <label>Версія лаунчера</label>
+          <span class="setting-info" id="launcherVersion">—</span>
+        </div>
 
-async function checkServerStatus() {
-  const dot  = $('statusDot');
-  const text = $('statusText');
-  try {
-    const ip  = settings.serverIP || 'play.y-craft.net';
-    const res = await fetch(`https://api.mcsrvstat.us/3/${ip}`,
-      { signal: AbortSignal.timeout(8000) });
-    const data = await res.json();
-    if (data.online) {
-      dot.className    = 'status-dot online';
-      text.textContent = `${data.players?.online ?? 0}/${data.players?.max ?? '?'}`;
-    } else {
-      dot.className    = 'status-dot offline';
-      text.textContent = 'OFFLINE';
-    }
-  } catch {
-    dot.className    = 'status-dot';
-    text.textContent = '?';
-  }
-}
+        <div class="setting-row">
+          <label>Перевірити оновлення лаунчера</label>
+          <button class="btn-small" id="btnCheckUpdate">↻ Перевірити</button>
+        </div>
 
-function startParticles() {
-  const canvas = $('particleCanvas');
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  const resize = () => { canvas.width = canvas.offsetWidth; canvas.height = canvas.offsetHeight; };
-  resize();
-  window.addEventListener('resize', resize);
-  const pts = Array.from({ length: 50 }, () => ({
-    x: Math.random() * canvas.width,  y: Math.random() * canvas.height,
-    vx: (Math.random() - 0.5) * 0.3, vy: -Math.random() * 0.5 - 0.1,
-    r: Math.random() * 1.5 + 0.3,    a: Math.random(),
-    col: Math.random() > 0.5 ? '201,168,76' : '91,141,238'
-  }));
-  const loop = () => {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    pts.forEach(p => {
-      p.x += p.vx; p.y += p.vy;
-      if (p.y < -5)             p.y = canvas.height + 5;
-      if (p.x < -5)             p.x = canvas.width  + 5;
-      if (p.x > canvas.width+5) p.x = -5;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(${p.col},${p.a * 0.6})`;
-      ctx.fill();
-    });
-    requestAnimationFrame(loop);
-  };
-  loop();
-}
+        <div id="updateNotice" class="update-notice" style="display:none"></div>
+      </section>
 
-function toast(msg, type = 'info', dur = 4000) {
-  const el = document.createElement('div');
-  el.className   = `toast ${type}`;
-  el.textContent = msg;
-  $('toastContainer').appendChild(el);
-  setTimeout(() => el.remove(), dur);
-}
+    </div>
+  </div>
 
-function showModal(title, body) {
-  return new Promise(resolve => {
-    $('modalTitle').textContent = title;
-    $('modalBody').textContent  = body;
-    $('modal').style.display    = 'flex';
-    const cleanup = result => {
-      $('modal').style.display = 'none';
+</main>
 
-      const ok = $('modalOk');
-      const cn = $('modalCancel');
-      ok.replaceWith(ok.cloneNode(true));
-      cn.replaceWith(cn.cloneNode(true));
-      resolve(result);
-    };
-    $('modalOk').addEventListener('click',     () => cleanup(true),  { once: true });
-    $('modalCancel').addEventListener('click', () => cleanup(false), { once: true });
-  });
-}
+<!-- ══════════════ СПОВІЩЕННЯ ══════════════ -->
+<div id="toastContainer"></div>
 
-function esc(s) {
-  return String(s)
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
+<!-- ══════════════ МОДАЛЬНЕ ВІКНО ══════════════ -->
+<div id="modal" class="modal-overlay" style="display:none">
+  <div class="modal-box">
+    <h3 id="modalTitle">Повідомлення</h3>
+    <p  id="modalBody"></p>
+    <div class="modal-btns">
+      <button class="btn-modal-cancel" id="modalCancel">Скасувати</button>
+      <button class="btn-modal-ok"     id="modalOk">ОК</button>
+    </div>
+  </div>
+</div>
+
+<script src="renderer.js"></script>
+</body>
+</html>
