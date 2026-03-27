@@ -1,4 +1,4 @@
-name: Build
+name: Build Launcher
 
 on:
   push:
@@ -13,11 +13,15 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm install
-      - run: npm run build:win
+      - name: Install dependencies
+        run: npm install
+      - name: Build Windows
+        run: npm run build:win
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
-      - uses: actions/upload-artifact@v4
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
         with:
           name: windows-installer
           path: dist/*.exe
@@ -29,13 +33,17 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm install
-      - run: npm run build:mac
+      - name: Install dependencies
+        run: npm install
+      - name: Build macOS
+        run: npm run build:mac
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
-      - uses: actions/upload-artifact@v4
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: mac-installer
+          name: mac-installers
           path: dist/*.dmg
 
   build-linux:
@@ -45,9 +53,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm install
-      - run: npm run build:linux
-      - uses: actions/upload-artifact@v4
+      - name: Install dependencies
+        run: npm install
+      - name: Build Linux
+        run: npm run build:linux
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: linux-installer
+          name: linux-appimage
           path: dist/*.AppImage
