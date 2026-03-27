@@ -1,0 +1,605 @@
+'use strict';
+
+let settings    = {};
+let gameRunning = false;
+let consoleLines = [];
+let progressTimeout = null;
+
+const $ = id => document.getElementById(id);
+
+document.addEventListener('DOMContentLoaded', async () => {
+  await loadSettings();
+  setupTabs();
+  setupPlayTab();
+  setupModsTab();
+  setupSettingsTab();
+  setupConsoleTab();
+  setupIPCListeners();
+  startParticles();
+  checkServerStatus();
+  setInterval(checkServerStatus, 60_000);
+});
+
+async function loadSettings() {
+  settings = await launcher.getSettings();
+  $('nicknameInput').value        = settings.username     || '';
+  $('autoConnectCheck').checked   = settings.autoConnect  || false;
+  $('ramSlider').value            = settings.ram          || 2048;
+  $('ramVal').textContent         = (settings.ram || 2048) + ' МБ';
+  $('winWidth').value             = settings.windowWidth  || 1280;
+  $('winHeight').value            = settings.windowHeight || 720;
+  $('fullscreenCheck').checked    = settings.fullscreen   || false;
+  $('closeOnLaunchCheck').checked = settings.closeOnLaunch !== false;
+  $('javaPath').value             = settings.javaPath     || '';
+  $('gameDir').value              = settings.gameDir      || '';
+  $('serverIP').value             = settings.serverIP     || 'play.y-craft.net';
+  $('autoConnectSetting').checked = settings.autoConnect  || false;
+  const ver = await launcher.getVersion();
+  $('launcherVersion').textContent = 'v' + ver;
+}
+
+function setupTabs() {
+  document.querySelectorAll('.nav-item').forEach(el => {
+    el.addEventListener('click', e => {
+      e.preventDefault();
+      const tab = el.dataset.tab;
+      document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      el.classList.add('active');
+      $('tab-' + tab).classList.add('active');
+      if (tab === 'mods') loadModsTab();
+    });
+  });
+}
+
+function setupPlayTab() {
+  const nickInput = $('nicknameInput');
+
+  nickInput.addEventListener('input', () => {
+    const val   = nickInput.value.trim();
+    const valid = /^[A-Za-z0-9_]{3,16}$/.test(val);
+    nickInput.classList.toggle('valid',   val.length > 0 && valid);
+    nickInput.classList.toggle('invalid', val.length > 0 && !valid);
+    $('nickHint').textContent = val.length > 0 && !valid
+      ? '3–16 символів: лише латинські літери, цифри та _' : '';
+  });
+
+  if (settings.username) {
+    nickInput.value = settings.username;
+    nickInput.dispatchEvent(new Event('input'));
+  }
+
+  $('autoConnectCheck').addEventListener('change', () => {
+    launcher.setSetting('autoConnect', $('autoConnectCheck').checked);
+    $('autoConnectSetting').checked = $('autoConnectCheck').checked;
+  });
+
+  $('btnLaunch').addEventListener('click', async () => {
+    if (gameRunning) return killGame();
+    await startGame();
+  });
+
+  $('btnUpdate').addEventListener('click', async () => {
+    const btn = $('btnUpdate');
+    btn.disabled = true;
+    btn.textContent = '…';
+    await runModpackUpdate();
+    btn.disabled = false;
+    btn.textContent = '↻';
+  });
+
+  loadNews();
+}
+
+async function startGame() {
+  const nick = $('nicknameInput').value.trim();
+  if (!nick || !/^[A-Za-z0-9_]{3,16}$/.test(nick)) {
+    toast('Введіть коректний нікнейм (3–16 символів: латинські літери, цифри, _)', 'error');
+    $('nicknameInput').focus();
+    return;
+  }
+
+  await launcher.setSetting('username', nick);
+  settings.username = nick;
+
+  try {
+
+    showProgress('Перевірка встановлення Forge…', 0);
+
+    const forgeInstalled = await launcher.checkForge();
+
+    if (!forgeInstalled) {
+      const ok = await showModal(
+        'Встановлення Forge',
+        'Forge 1.20.1-47.4.10 не встановлено.\n\n' +
+        'Буде завантажено: Minecraft 1.20.1, ігрові ресурси, бібліотеки та Forge.\n' +
+        'Розмір: ~500–900 МБ. Час: 5–15 хвилин.\n\n' +
+        'Продовжити?'
+      );
+      if (!ok) { hideProgress(); return; }
+
+      showProgress('Встановлення Forge 1.20.1-47.4.10…', 2);
+      const r = await launcher.installForge();
+      if (r.error) {
+        toast('Помилка встановлення Forge: ' + r.error, 'error');
+        appendConsole('[ПОМИЛКА] ' + r.error, true);
+        hideProgress();
+        return;
+      }
+      toast('Forge успішно встановлено!', 'success');
+    }
+
+    showProgress('Перевірка модпаку…', 20);
+    const modCheck = await launcher.checkModpack();
+
+    if (!modCheck.upToDate && !modCheck.offline && !modCheck.error) {
+      showProgress(`Оновлення модпаку (v${modCheck.remoteVersion})…`, 25);
+      const r = await launcher.updateModpack();
+      if (r.error) {
+        toast('Помилка оновлення модпаку: ' + r.error, 'warning');
+      }
+    }
+
+    showProgress('Запуск Minecraft…', 95);
+    setLaunchBtn('launching');
+
+    clearTimeout(progressTimeout);
+    progressTimeout = setTimeout(() => {
+      if ($('progressWrap').style.display !== 'none') {
+        hideProgress();
+        setLaunchBtn('idle');
+        toast('Час очікування вичерпано. Перевірте консоль.', 'warning');
+      }
+    }, 60_000);
+
+    const result = await launcher.launch({
+      username:    nick,
+      ram:         settings.ram,
+      javaPath:    settings.javaPath,
+      width:       settings.windowWidth,
+      height:      settings.windowHeight,
+      autoConnect: $('autoConnectCheck').checked
+    });
+
+    if (result.error) {
+      clearTimeout(progressTimeout);
+      toast('Помилка запуску: ' + result.error, 'error');
+      appendConsole('[ПОМИЛКА] ' + result.error, true);
+      setLaunchBtn('idle');
+      hideProgress();
+    }
+
+  } catch (err) {
+    clearTimeout(progressTimeout);
+    toast('Несподівана помилка: ' + err.message, 'error');
+    appendConsole('[ПОМИЛКА] ' + err.message, true);
+    setLaunchBtn('idle');
+    hideProgress();
+  }
+}
+
+function killGame() {
+  launcher.kill();
+  toast('Процес гри завершено', 'warning');
+  setLaunchBtn('idle');
+  hideProgress();
+}
+
+function setLaunchBtn(state) {
+  const btn   = $('btnLaunch');
+  const label = $('btnLaunchLabel');
+  btn.classList.remove('running');
+  btn.disabled  = false;
+  gameRunning   = false;
+
+  if (state === 'launching') {
+    btn.disabled = true;
+    label.textContent = 'ЗАПУСК…';
+  } else if (state === 'running') {
+    btn.classList.add('running');
+    gameRunning = true;
+    btn.disabled = false;
+    label.textContent = 'ГРАЄ  ■ ЗУПИНИТИ';
+  } else {
+    label.textContent = 'ГРАТИ';
+  }
+}
+
+function showProgress(label, pct) {
+  $('progressWrap').style.display = 'flex';
+  $('progressLabel').textContent  = label;
+  $('progressFill').style.width   = Math.max(2, pct) + '%';
+  $('progressSub').textContent    = '';
+  $('btnLaunch').disabled         = true;
+}
+
+function updateProgress(pct, sub) {
+  $('progressFill').style.width = Math.max(2, pct) + '%';
+  if (sub !== undefined) $('progressSub').textContent = sub;
+}
+
+function hideProgress() {
+  clearTimeout(progressTimeout);
+  $('progressWrap').style.display = 'none';
+  if (!gameRunning) $('btnLaunch').disabled = false;
+}
+
+async function runModpackUpdate() {
+  showProgress('Перевірка оновлень…', 5);
+  const check = await launcher.checkModpack();
+
+  if (check.upToDate) {
+    toast('Модпак вже актуальний!', 'success');
+    hideProgress(); return;
+  }
+  if (check.offline || check.error) {
+    toast('Сервер оновлень недоступний', 'warning');
+    hideProgress(); return;
+  }
+
+  showProgress(`Завантаження модпаку v${check.remoteVersion}…`, 10);
+  const r = await launcher.updateModpack();
+  hideProgress();
+
+  if (r.error) {
+    toast('Помилка оновлення: ' + r.error, 'error');
+  } else {
+    toast('Модпак оновлено!', 'success');
+
+    if ($('tab-mods').classList.contains('active')) loadModsTab();
+  }
+}
+
+function loadNews() {
+  const items = [
+    'Ласкаво просимо на Y-Craft! Заходьте на play.y-craft.net',
+    'Нове оновлення: Модпак v2.1 — додано 5 нових модів!',
+    'Подія вихідних: подвійний досвід у суботу та неділю!'
+  ];
+  let i = 0;
+  const cycle = () => { $('newsText').textContent = items[i++ % items.length]; };
+  cycle();
+  setInterval(cycle, 8_000);
+}
+
+async function loadModsTab() {
+  const list = $('modList');
+  list.innerHTML = '<div class="loading-placeholder">Завантаження списку модів…</div>';
+
+  try {
+
+    const mods = await launcher.listMods();
+
+    $('statModCount').textContent = mods.length;
+
+    try {
+      const check = await launcher.checkModpack();
+      $('statPackVersion').textContent = check.remoteVersion || check.version || 'локальний';
+    } catch {
+      $('statPackVersion').textContent = 'N/A';
+    }
+
+    if (!mods.length) {
+      list.innerHTML = `
+        <div class="loading-placeholder">
+          <div style="margin-bottom:8px">📭 Папка mods/ порожня або не існує</div>
+          <div style="font-size:11px;color:var(--text-muted)">
+            Шлях: ${(settings.gameDir || '?') + '/mods'}
+          </div>
+        </div>`;
+      return;
+    }
+
+    renderModList(mods, $('modSearch').value);
+
+  } catch (e) {
+    list.innerHTML = `<div class="loading-placeholder" style="color:var(--red)">Помилка: ${esc(e.message)}</div>`;
+  }
+}
+
+function renderModList(mods, filter = '') {
+  const q    = filter.toLowerCase();
+  const shown = q ? mods.filter(m => m.name.toLowerCase().includes(q) || m.filename.toLowerCase().includes(q)) : mods;
+  const list  = $('modList');
+
+  if (!shown.length) {
+    list.innerHTML = '<div class="loading-placeholder">Нічого не знайдено</div>';
+    return;
+  }
+
+  list.innerHTML = shown.map((m, i) => `
+    <div class="mod-item">
+      <span class="mod-icon">${modIcon(m.filename)}</span>
+      <div class="mod-info">
+        <div class="mod-name">${esc(m.name)}</div>
+        <div class="mod-version">${esc(m.filename)} · ${esc(m.size)}</div>
+      </div>
+      <span class="mod-badge required">Встановлено</span>
+    </div>
+  `).join('');
+}
+
+function modIcon(filename) {
+  const n = filename.toLowerCase();
+  if (n.includes('create'))    return '⚙';
+  if (n.includes('ae2') || n.includes('appliedenergistics')) return '⚡';
+  if (n.includes('thermal'))   return '🔥';
+  if (n.includes('biome'))     return '🌿';
+  if (n.includes('jei'))       return '📖';
+  if (n.includes('waystone'))  return '🪨';
+  if (n.includes('tinker'))    return '⚒';
+  if (n.includes('botania'))   return '🌸';
+  if (n.includes('chest') || n.includes('iron')) return '📦';
+  if (n.includes('xaero') || n.includes('minimap') || n.includes('worldmap')) return '🗺';
+  if (n.includes('optifine') || n.includes('optifinefabric')) return '🎨';
+  if (n.includes('jer') || n.includes('resources')) return '💎';
+  if (n.includes('sort') || n.includes('inventory')) return '📋';
+  if (n.includes('forge'))     return '🔨';
+  if (n.includes('journeymap')) return '🌍';
+  if (n.includes('waila') || n.includes('hwyla') || n.includes('jade')) return '🔍';
+  if (n.includes('storage'))   return '🗄';
+  if (n.includes('mekanism'))  return '⚗';
+  if (n.includes('immersive')) return '🏭';
+  if (n.includes('pam') || n.includes('food') || n.includes('harvest')) return '🌾';
+  return '🧩';
+}
+
+function setupModsTab() {
+  $('btnRefreshMods').addEventListener('click', loadModsTab);
+  $('modSearch').addEventListener('input', async () => {
+    const mods = await launcher.listMods();
+    renderModList(mods, $('modSearch').value);
+  });
+}
+
+function setupConsoleTab() {
+  $('btnClearConsole').addEventListener('click', () => {
+    consoleLines = [];
+    $('consoleOutput').textContent = '';
+  });
+  $('btnCopyConsole').addEventListener('click', () => {
+    navigator.clipboard.writeText(consoleLines.join('\n'))
+      .then(() => toast('Консоль скопійовано', 'info'))
+      .catch(() => toast('Не вдалося скопіювати', 'error'));
+  });
+}
+
+function appendConsole(line, isErr = false) {
+  if (!line) return;
+  consoleLines.push(line);
+  if (consoleLines.length > 5000) consoleLines.shift();
+
+  const pre = $('consoleOutput');
+  const el  = document.createElement('span');
+  el.textContent = line + '\n';
+  if (isErr) el.style.color = '#e07070';
+  pre.appendChild(el);
+
+  while (pre.children.length > 5000) pre.removeChild(pre.firstChild);
+
+  const wrap = pre.parentElement;
+  wrap.scrollTop = wrap.scrollHeight;
+}
+
+function setupSettingsTab() {
+  $('ramSlider').addEventListener('input', () => {
+    $('ramVal').textContent = $('ramSlider').value + ' МБ';
+  });
+
+  $('btnBrowseJava').addEventListener('click', async () => {
+    const p = await launcher.browseJava();
+    if (p) { $('javaPath').value = p; launcher.setSetting('javaPath', p); toast('Шлях до Java оновлено', 'success'); }
+  });
+
+  $('btnBrowseDir').addEventListener('click', async () => {
+    const p = await launcher.browseGameDir();
+    if (p) { $('gameDir').value = p; launcher.setSetting('gameDir', p); toast('Теку гри оновлено', 'success'); }
+  });
+
+  $('btnOpenDir').addEventListener('click', () => launcher.openGameDir());
+  $('btnSaveSettings').addEventListener('click', saveSettings);
+
+  $('autoConnectSetting').addEventListener('change', () => {
+    $('autoConnectCheck').checked = $('autoConnectSetting').checked;
+  });
+
+  $('btnCheckUpdate').addEventListener('click', async () => {
+    $('btnCheckUpdate').textContent = 'Перевірка…';
+    await launcher.checkUpdate();
+    $('btnCheckUpdate').textContent = '↻ Перевірити';
+  });
+
+  $('javaVersion').textContent = settings.javaPath ? 'Вказано власний шлях' : 'Авто-визначення';
+}
+
+async function saveSettings() {
+  await launcher.setSettings({
+    ram:           parseInt($('ramSlider').value),
+    windowWidth:   parseInt($('winWidth').value),
+    windowHeight:  parseInt($('winHeight').value),
+    fullscreen:    $('fullscreenCheck').checked,
+    closeOnLaunch: $('closeOnLaunchCheck').checked,
+    javaPath:      $('javaPath').value,
+    serverIP:      $('serverIP').value,
+    autoConnect:   $('autoConnectSetting').checked
+  });
+  settings = await launcher.getSettings();
+  toast('Налаштування збережено!', 'success');
+}
+
+function setupIPCListeners() {
+
+  launcher.onStarted(() => {
+    clearTimeout(progressTimeout);
+    setLaunchBtn('running');
+    hideProgress();
+    $('consoleStatus').textContent = '● Гра запущена';
+    $('consoleStatus').style.color = 'var(--green)';
+    appendConsole('[Launcher] Гру успішно запущено');
+    if (settings.closeOnLaunch) launcher.close();
+  });
+
+  launcher.onClosed(({ code }) => {
+    clearTimeout(progressTimeout);
+    setLaunchBtn('idle');
+    hideProgress();
+    $('consoleStatus').textContent = `Гру закрито (код: ${code})`;
+    $('consoleStatus').style.color = 'var(--text-muted)';
+    appendConsole(`[Launcher] Гру закрито, код виходу: ${code}`);
+
+    if ($('tab-mods').classList.contains('active')) loadModsTab();
+  });
+
+  launcher.onError(({ message }) => {
+    clearTimeout(progressTimeout);
+    setLaunchBtn('idle');
+    hideProgress();
+    toast('Помилка гри: ' + message, 'error');
+    appendConsole('[ПОМИЛКА] ' + message, true);
+  });
+
+  launcher.onStdout(line => appendConsole(line));
+  launcher.onStderr(line => {
+
+    if (line.includes('LWJGL') && line.includes('version')) return;
+    appendConsole(line, line.toLowerCase().includes('error') || line.toLowerCase().includes('exception'));
+  });
+
+  launcher.onForgeProgress(data => {
+    const pct = 5 + Math.round((data.percent || 0) * 0.9);
+    updateProgress(pct);
+    if (data.received && data.total) {
+      $('progressSub').textContent = `${data.file} — ${data.received} / ${data.total}`;
+    } else if (data.message) {
+      $('progressSub').textContent = data.message.slice(0, 80);
+    }
+  });
+
+  launcher.onForgeStatus(data => {
+    if (data.message) {
+      $('progressLabel').textContent = data.message;
+      if (data.done) hideProgress();
+    }
+  });
+
+  launcher.onModpackProgress(data => {
+    const pct = 25 + Math.round((data.percent || 0) * 0.7);
+    updateProgress(pct);
+    if (data.received && data.total) {
+      $('progressSub').textContent = `${data.file} — ${data.received} / ${data.total}`;
+    } else if (data.file) {
+      $('progressSub').textContent = data.file;
+    }
+  });
+
+  launcher.onModpackStatus(data => {
+    if (data.message) $('progressLabel').textContent = data.message;
+  });
+
+  launcher.onUpdaterStatus(data => {
+    const notice = $('updateNotice');
+    if (data.status === 'available') {
+      notice.style.display = 'block';
+      notice.className     = 'update-notice';
+      notice.innerHTML     = `🆕 Доступне оновлення лаунчера v${data.version}!
+        <button class="btn-small" onclick="launcher.installUpdate()" style="margin-left:10px">Встановити та перезапустити</button>`;
+      toast(`Доступне оновлення v${data.version}!`, 'info');
+    } else if (data.status === 'ready') {
+      notice.style.display = 'block';
+      notice.innerHTML = '✅ Оновлення завантажено. <button class="btn-small" onclick="launcher.installUpdate()">Перезапустити</button>';
+    } else if (data.status === 'error') {
+      notice.style.display = 'block';
+      notice.className     = 'update-notice error';
+      notice.textContent   = 'Помилка оновлення: ' + data.message;
+    }
+  });
+
+  launcher.onUpdaterProgress(data => {
+    const n = $('updateNotice');
+    n.style.display = 'block';
+    n.textContent = `Завантаження оновлення: ${data.percent}% (${data.received} / ${data.total})`;
+  });
+}
+
+async function checkServerStatus() {
+  const dot  = $('statusDot');
+  const text = $('statusText');
+  try {
+    const ip  = settings.serverIP || 'play.y-craft.net';
+    const res = await fetch(`https://api.mcsrvstat.us/3/${ip}`,
+      { signal: AbortSignal.timeout(8000) });
+    const data = await res.json();
+    if (data.online) {
+      dot.className    = 'status-dot online';
+      text.textContent = `${data.players?.online ?? 0}/${data.players?.max ?? '?'}`;
+    } else {
+      dot.className    = 'status-dot offline';
+      text.textContent = 'OFFLINE';
+    }
+  } catch {
+    dot.className    = 'status-dot';
+    text.textContent = '?';
+  }
+}
+
+function startParticles() {
+  const canvas = $('particleCanvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const resize = () => { canvas.width = canvas.offsetWidth; canvas.height = canvas.offsetHeight; };
+  resize();
+  window.addEventListener('resize', resize);
+  const pts = Array.from({ length: 50 }, () => ({
+    x: Math.random() * canvas.width,  y: Math.random() * canvas.height,
+    vx: (Math.random() - 0.5) * 0.3, vy: -Math.random() * 0.5 - 0.1,
+    r: Math.random() * 1.5 + 0.3,    a: Math.random(),
+    col: Math.random() > 0.5 ? '201,168,76' : '91,141,238'
+  }));
+  const loop = () => {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    pts.forEach(p => {
+      p.x += p.vx; p.y += p.vy;
+      if (p.y < -5)             p.y = canvas.height + 5;
+      if (p.x < -5)             p.x = canvas.width  + 5;
+      if (p.x > canvas.width+5) p.x = -5;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(${p.col},${p.a * 0.6})`;
+      ctx.fill();
+    });
+    requestAnimationFrame(loop);
+  };
+  loop();
+}
+
+function toast(msg, type = 'info', dur = 4000) {
+  const el = document.createElement('div');
+  el.className   = `toast ${type}`;
+  el.textContent = msg;
+  $('toastContainer').appendChild(el);
+  setTimeout(() => el.remove(), dur);
+}
+
+function showModal(title, body) {
+  return new Promise(resolve => {
+    $('modalTitle').textContent = title;
+    $('modalBody').textContent  = body;
+    $('modal').style.display    = 'flex';
+    const cleanup = result => {
+      $('modal').style.display = 'none';
+
+      const ok = $('modalOk');
+      const cn = $('modalCancel');
+      ok.replaceWith(ok.cloneNode(true));
+      cn.replaceWith(cn.cloneNode(true));
+      resolve(result);
+    };
+    $('modalOk').addEventListener('click',     () => cleanup(true),  { once: true });
+    $('modalCancel').addEventListener('click', () => cleanup(false), { once: true });
+  });
+}
+
+function esc(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
